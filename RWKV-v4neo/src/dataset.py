@@ -29,12 +29,12 @@ class MyDataset(Dataset):
                 exit(0)
             else:
                 self.data = MMapIndexedDataset(args.data_file)
-                self.data_size = len(self.data._bin_buffer) // 2
+                self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_size
                 rank_zero_info(f"Data has {self.data_size} tokens.")
 
             if args.my_qa_mask > 0:
                 self.data_pile = MMapIndexedDataset('/fsx/BlinkDL/pile/pile_20B_tokenizer_text_document')
-                self.data_pile_size = len(self.data_pile._bin_buffer) // 2
+                self.data_pile_size = len(self.data_pile._bin_buffer) // self.data._index._dtype_size
 
             if args.my_pile_stage > 0:
                 # assert self.data_size == 332115325534 and self.vocab_size == 50277
