@@ -349,10 +349,25 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.lora_load, map_location="cpu"),
                               strict=False)
 
-    trainer = Trainer.from_argparse_args(
+    trainer: Trainer = Trainer.from_argparse_args(
         args,
         callbacks=[train_callback(args)],
     )
+    
+    if (args.lr_init > 1e-4 or trainer.world_size * args.micro_bsz * trainer.accumulate_grad_batches < 8):
+        if 'I_KNOW_WHAT_IM_DOING' in os.environ:
+            if trainer.global_rank == 0:
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print(f'  WARNING: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({trainer.world_size} * {args.micro_bsz} * {trainer.accumulate_grad_batches} < 8)')
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+        else:
+            if trainer.global_rank == 0:
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print(f'  ERROR: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({trainer.world_size} * {args.micro_bsz} * {trainer.accumulate_grad_batches} < 8)')
+                print(f'  Unless you are sure this is what you want, adjust them accordingly')
+                print(f'  (to suppress this, set environment variable "I_KNOW_WHAT_IM_DOING")')
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            exit(0)
 
     if trainer.global_rank == 0:
         for n in model.state_dict():
