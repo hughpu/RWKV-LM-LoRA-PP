@@ -18,6 +18,7 @@ if importlib.util.find_spec('deepspeed'):
     from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 
 # from deepspeed.runtime.fp16.onebit.zoadam import ZeroOneAdam
+from typing import Tuple, List, TypeVar
 
 LORA_CONFIG = {
     "r": 0,
@@ -422,6 +423,104 @@ class Block(nn.Module):
         return x
 
 
+TTT = TypeVar("TTT", Tuple[torch.Tensor, torch.Tensor, torch.Tensor])
+TT = TypeVar("TT", Tuple[torch.Tensor, torch.Tensor])
+class PPEmbedding(nn.Module):
+    def __init__(
+        self,
+        rwkv: RWKV
+    ):
+        super().__init__()
+        self.emb = rwkv.emb
+        self.pass_emb_to_output = rwkv.args.tiny_att_dim > 0
+        self.pass_idx = rwkv.args.head_qk > 0
+    
+    def forward(self, inputs: torch.Tensor) -> TTT:
+        outputs = self.emb(inputs)
+        if self.pass_emb_to_output:
+            outputs = (outputs, outputs)
+        
+        if self.pass_idx:
+            outputs = (*outputs, inputs)
+        
+        return outputs
+    
+    def update(self, rwkv: RWKV):
+        rwkv.emb = self.emb
+
+
+class PPBlock(nn.Module):
+    def __init__(self, block: Block):
+        super().__init__()
+        self.block = block
+    
+    def forward(self, inputs: TTT) -> TTT:
+        x, x_emb, idx = inputs
+        output = self.block(x, x_emb=x_emb)
+        return (output, x_emb, idx)
+    
+    def to_block(self) -> Block:
+        return self.block
+
+
+class PPLinearOut(nn.Module):
+    def __init__(self, ln_out: nn.LayerNorm):
+        super().__init__()
+        self.ln_out = ln_out
+    
+    def forward(self, inputs: TTT) -> TT:
+        x, _, idx = inputs
+        output = self.ln_out(x)
+        return (output, idx)
+    
+    def to_ln(self) -> nn.LayerNorm:
+        return self.ln_out
+
+
+class PPHead(nn.Module):
+    def __init__(
+        self,
+        rwkv: RWKV
+    ):
+        self.head_qk = rwkv.args.head_qk
+        self.head = rwkv.head
+        
+        if self.head_qk > 0:
+            self.head_q = rwkv.head_q
+            self.head_k = rwkv.head_k
+            self.vocab_size = rwkv.args.vocab_size
+            ctx_len = rwkv.args.ctx_len
+            self.register_buffer("copy_mask", torch.tril(torch.ones(ctx_len, ctx_len)))
+        
+    def forward(self, inputs: TT) -> torch.Tensor:
+        x, idx = inputs
+        _, T = idx.size()
+        if self.head_qk > 0:
+            q = self.head_q(x)[:, :T, :]
+            k = self.head_k(x)[:, :T, :]
+            c = (q @ k.transpose(-2, -1)) * (1.0 / self.head_qk)
+            c = c.masked_fill(self.copy_mask[:T, :T] == 0, 0)
+
+            if "32" in os.environ["RWKV_FLOAT_MODE"]:
+                c = c @ F.one_hot(idx, num_classes=self.vocab_size)
+            elif os.environ["RWKV_FLOAT_MODE"] == "fp16":
+                c = c @ F.one_hot(idx, num_classes=self.vocab_size).half()
+            elif os.environ["RWKV_FLOAT_MODE"] == "bf16":
+                c = c @ F.one_hot(idx, num_classes=self.vocab_size).bfloat16()
+
+            x = self.head(x) + c
+        else:
+            x = self.head(x)
+        
+        return x
+    
+    def update(self, rwkv: RWKV):
+        self.head = rwkv.head
+        if self.head_qk > 0:
+            rwkv.head_q = self.head_q
+            rwkv.head_k = self.head_k
+
+        
 class L2Wrap(torch.autograd.Function):
     @staticmethod
     def forward(ctx, loss, y):
@@ -525,7 +624,32 @@ class RWKV(pl.LightningModule):
             cfg = strategy.config["zero_optimization"]
             return cfg.get("offload_optimizer") or cfg.get("offload_param")
         return False
-
+    
+    def get_layers(self):
+        """export layers to construct deepspeed pipeline module layers"""
+        layers = []
+        layers.append(PPEmbedding(self))
+        layers.extend(PPBlock(block) for block in self.blocks)
+        layers.append(PPLinearOut(self.ln_out))
+        layers.append(PPHead(self))
+        
+        return layers
+    
+    def from_layers(self, layers: List[nn.Module]):
+        """load weights from a checkpointed deepspeed pipeline module layers"""
+        pp_emb: PPEmbedding = layers[0]
+        pp_emb.update(self)
+        
+        blocks_num = len(self.blocks)
+        for i, pp_block in enumerate(layers[1: blocks_num + 1]):
+            self.blocks[i] = pp_block.to_block()
+        
+        pp_ln_out: PPLinearOut = layers[1 + blocks_num]
+        self.ln_out = pp_ln_out.to_ln()
+        
+        pp_head: PPHead = layers[-1]
+        pp_head.update(self)
+    
     def forward(self, idx):
         args = self.args
         B, T = idx.size()
