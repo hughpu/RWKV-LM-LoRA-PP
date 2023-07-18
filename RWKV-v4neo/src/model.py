@@ -19,7 +19,8 @@ if importlib.util.find_spec('deepspeed'):
 
 # from deepspeed.runtime.fp16.onebit.zoadam import ZeroOneAdam
 from typing import Tuple, List, TypeVar, Type
-from deepspeed.pipe import LayerSpec
+from deepspeed.pipe import LayerSpec, PipelineModule
+from argparse import Namespace
 
 LORA_CONFIG = {
     "r": 0,
@@ -431,8 +432,7 @@ RWKVT = TypeVar("RWKVT", bound="RWKV")
 PPE = TypeVar("PPE", bound="PPEmbedding")
 class PPEmbedding(nn.Embedding):
     @classmethod
-    def get_spec_from_rwkv(cls: Type[PPE], rwkv: RWKVT) -> LayerSpec:
-        args = rwkv.args
+    def get_spec_from_rwkv_args(cls: Type[PPE], args: Namespace) -> LayerSpec:
         return LayerSpec(
             cls,
             args.tiny_att_dim,
@@ -469,8 +469,7 @@ class PPEmbedding(nn.Embedding):
 PPB = TypeVar("PPB", bound="PPBlock")
 class PPBlock(Block):
     @classmethod
-    def get_spec_from_rwkv(cls: Type[PPB], rwkv: RWKVT, layer_id: int) -> LayerSpec:
-        args = rwkv.args
+    def get_spec_from_rwkv_args(cls: Type[PPB], args: Namespace, layer_id: int) -> LayerSpec:
         return LayerSpec(
             cls,
             args,
@@ -494,11 +493,10 @@ class PPBlock(Block):
 PPLN = TypeVar("PPLN", bound="PPLinearOut")
 class PPLinearOut(nn.LayerNorm):
     @classmethod
-    def get_spec_from_rwkv(cls: Type[PPLN], rwkv: RWKVT) -> LayerSpec:
-        args = rwkv.args
+    def get_spec_from_rwkv_args(cls: Type[PPLN], args: Namespace) -> LayerSpec:
         return LayerSpec(
             cls,
-            args.n_embd,
+            args.n_embd
         )
     
     def forward(self, inputs: TTT) -> TT:
@@ -516,8 +514,7 @@ class PPLinearOut(nn.LayerNorm):
 PPH = TypeVar("PPH", bound="PPHead")
 class PPHead(nn.Module):
     @classmethod
-    def get_spec_from_rwkv(cls: Type[PPLN], rwkv: RWKVT) -> LayerSpec:
-        args = rwkv.args
+    def get_spec_from_rwkv_args(cls: Type[PPLN], args: Namespace) -> LayerSpec:
         return LayerSpec(
             cls,
             args.head_qk,
@@ -867,3 +864,71 @@ class RWKV(pl.LightningModule):
         gc.collect()
         torch.cuda.empty_cache()
         return m
+
+
+def get_loss(args):
+    def __loss_fn(outputs, labels):
+        """if there is mask, put the mask and target in the labels together"""
+
+        if args.my_qa_mask != 1:
+            logits, targets = outputs, labels
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        else:
+            targets, mask = labels
+            mask = mask.view(-1)
+            sum_mask = torch.sum(mask).item()
+            # if sum_mask == 0:
+            #     return torch.tensor([0.0], requires_grad=True)
+
+            logits = outputs
+            if sum_mask == mask.shape[0]:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+                # print('rank', self.global_rank, 'loss', loss.item())
+            else:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+                # loss_raw = loss
+                loss = torch.sum(loss * mask) / sum_mask
+
+                # torch.set_printoptions(threshold=10000)
+                # if True: #self.global_rank == 1:
+                #     tmp = ''
+                #     sss = 0
+                #     ccc = 0
+                #     for i in range(mask.shape[0]):
+                #         if mask[i] > 0:
+                #             tmp += str(idx.view(-1)[i].item()) + ','
+                #             sss += loss_raw.view(-1)[i].float().item()
+                #             ccc += 1
+                #     print('rank', self.global_rank, 'loss', loss.item(), 'lavg', sss / ccc)#, 'tmp', tmp, 'input', idx)
+
+        return L2Wrap.apply(loss, logits)
+    
+    return __loss_fn
+
+
+class RWKVPipe(PipelineModule):
+    def __init__(
+        self,
+        args: Namespace,
+        num_stages: int
+    ):
+
+        layer_specs = []
+        layer_specs.append(PPEmbedding.get_spec_from_rwkv_args(args))
+        layer_specs.extend(
+            PPBlock.get_spec_from_rwkv_args(args, layer_id)
+            for layer_id in range(args.n_layer)
+        )
+        layer_specs.append(PPLinearOut.get_spec_from_rwkv_args(args))
+        layer_specs.append(PPHead.get_spec_from_rwkv_args(args))
+        
+        loss_fn = get_loss(args)
+        super().__init__(layer_specs, num_stages=num_stages, loss_fn=loss_fn)
+
+    def load_state_from_rwkv(self, rwkv: RWKV):
+        for layer in self.forward_funcs:
+            assert isinstance(
+                layer,
+                (PPEmbedding, PPBlock, PPLinearOut, PPHead)
+            )
+            layer.load_state_from_rwkv(rwkv)
