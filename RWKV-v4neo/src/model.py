@@ -18,7 +18,8 @@ if importlib.util.find_spec('deepspeed'):
     from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 
 # from deepspeed.runtime.fp16.onebit.zoadam import ZeroOneAdam
-from typing import Tuple, List, TypeVar
+from typing import Tuple, List, TypeVar, Type
+from deepspeed.pipe import LayerSpec
 
 LORA_CONFIG = {
     "r": 0,
@@ -425,71 +426,121 @@ class Block(nn.Module):
 
 TTT = TypeVar("TTT", Tuple[torch.Tensor, torch.Tensor, torch.Tensor])
 TT = TypeVar("TT", Tuple[torch.Tensor, torch.Tensor])
-class PPEmbedding(nn.Module):
+RWKVT = TypeVar("RWKVT", bound="RWKV")
+
+PPE = TypeVar("PPE", bound="PPEmbedding")
+class PPEmbedding(nn.Embedding):
+    @classmethod
+    def get_spec_from_rwkv(cls: Type[PPE], rwkv: RWKVT) -> LayerSpec:
+        args = rwkv.args
+        return LayerSpec(
+            cls,
+            args.tiny_att_dim,
+            args.head_qk,
+            args.vocab_size,
+            args.n_embed
+        )
+    
     def __init__(
         self,
-        rwkv: RWKV
+        tiny_att_dim: int,
+        head_qk: int,
+        vocab_size: int,
+        n_embd: int
     ):
-        super().__init__()
-        self.emb = rwkv.emb
-        self.pass_emb_to_output = rwkv.args.tiny_att_dim > 0
-        self.pass_idx = rwkv.args.head_qk > 0
+        super().__init__(vocab_size, n_embd)
+        self.pass_emb_to_output = tiny_att_dim > 0
+        self.pass_idx = head_qk > 0
     
     def forward(self, inputs: torch.Tensor) -> TTT:
-        outputs = self.emb(inputs)
-        if self.pass_emb_to_output:
-            outputs = (outputs, outputs)
+        embedding = super().forward(inputs)
+        embedding_for_tiny_att = embedding if self.pass_emb_to_output else None
+        idx = inputs if self.pass_idx else None
         
-        if self.pass_idx:
-            outputs = (*outputs, inputs)
-        
-        return outputs
+        return (embedding, embedding_for_tiny_att, idx)
     
-    def update(self, rwkv: RWKV):
-        rwkv.emb = self.emb
+    def load_state_from_rwkv(self, rwkv: RWKVT):
+        self.load_state_dict(rwkv.emb.state_dict())
+
+    def export_state_to_rwkv(self, rwkv: RWKVT):
+        rwkv.emb.load_state_dict(self.state_dict())
 
 
-class PPBlock(nn.Module):
-    def __init__(self, block: Block):
-        super().__init__()
-        self.block = block
+PPB = TypeVar("PPB", bound="PPBlock")
+class PPBlock(Block):
+    @classmethod
+    def get_spec_from_rwkv(cls: Type[PPB], rwkv: RWKVT, layer_id: int) -> LayerSpec:
+        args = rwkv.args
+        return LayerSpec(
+            cls,
+            args,
+            layer_id
+        )
     
     def forward(self, inputs: TTT) -> TTT:
         x, x_emb, idx = inputs
-        output = self.block(x, x_emb=x_emb)
+        output = super().forward(x, x_emb=x_emb)
         return (output, x_emb, idx)
     
-    def to_block(self) -> Block:
-        return self.block
+    def load_state_from_rwkv(self, rwkv: RWKVT):
+        block: Block = rwkv.blocks[self.layer_id]
+        self.load_state_dict(block.state_dict())
+
+    def export_state_to_rwkv(self, rwkv: RWKVT):
+        block: Block = rwkv.blocks[self.layer_id]
+        block.load_state_dict(self.state_dict())
 
 
-class PPLinearOut(nn.Module):
-    def __init__(self, ln_out: nn.LayerNorm):
-        super().__init__()
-        self.ln_out = ln_out
+PPLN = TypeVar("PPLN", bound="PPLinearOut")
+class PPLinearOut(nn.LayerNorm):
+    @classmethod
+    def get_spec_from_rwkv(cls: Type[PPLN], rwkv: RWKVT) -> LayerSpec:
+        args = rwkv.args
+        return LayerSpec(
+            cls,
+            args.n_embd,
+        )
     
     def forward(self, inputs: TTT) -> TT:
         x, _, idx = inputs
-        output = self.ln_out(x)
+        output = super().forward(x)
         return (output, idx)
     
-    def to_ln(self) -> nn.LayerNorm:
-        return self.ln_out
+    def load_state_from_rwkv(self, rwkv: RWKVT):
+        self.load_state_dict(rwkv.ln_out.state_dict())
+
+    def export_state_to_rwkv(self, rwkv: RWKVT):
+        rwkv.ln_out.load_state_dict(self.state_dict())
 
 
+PPH = TypeVar("PPH", bound="PPHead")
 class PPHead(nn.Module):
+    @classmethod
+    def get_spec_from_rwkv(cls: Type[PPLN], rwkv: RWKVT) -> LayerSpec:
+        args = rwkv.args
+        return LayerSpec(
+            cls,
+            args.head_qk,
+            args.n_embd,
+            args.vocab_size,
+            args.ctx_len
+        )
+
     def __init__(
         self,
-        rwkv: RWKV
+        head_qk: int,
+        n_embd: int,
+        vocab_size: int,
+        ctx_len: int
     ):
-        self.head_qk = rwkv.args.head_qk
-        self.head = rwkv.head
+        self.head_qk = head_qk
+        self.head = nn.Linear(n_embd, vocab_size, bias=False)
         
-        if self.head_qk > 0:
-            self.head_q = rwkv.head_q
-            self.head_k = rwkv.head_k
-            self.vocab_size = rwkv.args.vocab_size
-            ctx_len = rwkv.args.ctx_len
+        self.is_involve_head_qk = self.head_k > 0
+        if self.is_involve_head_qk:
+            self.head_q = nn.Linear(n_embd, head_qk, bias=False)
+            self.head_k = nn.Linear(n_embd, head_qk, bias=False)
+            self.vocab_size = vocab_size
             self.register_buffer("copy_mask", torch.tril(torch.ones(ctx_len, ctx_len)))
         
     def forward(self, inputs: TT) -> torch.Tensor:
@@ -513,12 +564,28 @@ class PPHead(nn.Module):
             x = self.head(x)
         
         return x
-    
-    def update(self, rwkv: RWKV):
-        self.head = rwkv.head
-        if self.head_qk > 0:
-            rwkv.head_q = self.head_q
-            rwkv.head_k = self.head_k
+
+    def load_state_from_rwkv(self, rwkv: RWKVT):
+        self.head.load_state_dict(rwkv.head.state_dict())
+        
+        if self.is_involve_head_qk:
+            self.head_k.load_state_dict(rwkv.head_k.state_dict())
+            self.head_q.load_state_dict(rwkv.head_q.state_dict())
+            self.load_state_dict(
+                {"copy_mask": rwkv.state_dict()["copy_mask"]},
+                strict=False
+            )
+
+    def export_state_to_rwkv(self, rwkv: RWKVT):
+        rwkv.head.load_state_dict(self.head.state_dict())
+        
+        if self.is_involve_head_qk:
+            rwkv.head_k.load_state_dict(self.head_k.state_dict())
+            rwkv.head_q.load_state_dict(self.head_q.state_dict())
+            rwkv.load_state_dict(
+                {"copy_mask": self.state_dict()["copy_mask"]},
+                strict=False
+            )
 
         
 class L2Wrap(torch.autograd.Function):
