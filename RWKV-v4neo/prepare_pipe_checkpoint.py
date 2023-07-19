@@ -4,6 +4,7 @@ author: hughpu@hotmail.com
 """
 
 import os
+import gc
 # use cpu large ram to do this job
 # os.environ['DS_ACCELERATOR'] = "cpu"
 
@@ -65,7 +66,6 @@ if __name__ == "__main__":
         args.dim_att = args.n_embd
     if args.dim_ffn <= 0:
         args.dim_ffn = args.n_embd * 4
-    model = RWKV(args)
 
     # only train lora parameters
     if args.lora:
@@ -77,6 +77,10 @@ if __name__ == "__main__":
         enable_time_finetune = 'time' in LORA_CONFIG["parts"]
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
 
+    model = RWKV(args)
+    print("got plain rwkv model from args.")
+
+    if args.lora:
         model.requires_grad_(False)
         for name, module in model.named_modules():
             # have to check param name since it may have been wrapped by torchscript
@@ -101,13 +105,23 @@ if __name__ == "__main__":
                 load_dict[k] = model.state_dict()[k]
 
     model.load_state_dict(load_dict, strict=(not args.lora))
+    print("loaded pretrained parameters into rwkv model.")
+    
+    del load_dict
+    gc.collect()
     
     deepspeed.init_distributed()
+    print("init dstributed environment.")
     
     pipe_model = RWKVPipe(args, num_stages=1)
     pipe_model.load_state_from_rwkv(model)
+    print("shifted model parameters from rwkv to its pipeline module.")
+    
+    del model
+    gc.collect()
 
     if not os.path.exists(args.proj_dir):
         os.makedirs(args.proj_dir)
     
     pipe_model.save_state_dict(save_dir=args.proj_dir)
+    print(f"successfuly saved pretrained rwkv in pipeline mode checkpoints under {args.proj_dir}.")
