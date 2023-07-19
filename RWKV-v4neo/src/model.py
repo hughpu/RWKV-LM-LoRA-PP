@@ -425,8 +425,8 @@ class Block(nn.Module):
         return x
 
 
-TTT = TypeVar("TTT", Tuple[torch.Tensor, torch.Tensor, torch.Tensor])
-TT = TypeVar("TT", Tuple[torch.Tensor, torch.Tensor])
+TTT = TypeVar("TTT", bound=Tuple[torch.Tensor, torch.Tensor, torch.Tensor])
+TT = TypeVar("TT", bound=Tuple[torch.Tensor, torch.Tensor])
 RWKVT = TypeVar("RWKVT", bound="RWKV")
 
 PPE = TypeVar("PPE", bound="PPEmbedding")
