@@ -689,31 +689,6 @@ class RWKV(pl.LightningModule):
             return cfg.get("offload_optimizer") or cfg.get("offload_param")
         return False
     
-    def get_layers(self):
-        """export layers to construct deepspeed pipeline module layers"""
-        layers = []
-        layers.append(PPEmbedding(self))
-        layers.extend(PPBlock(block) for block in self.blocks)
-        layers.append(PPLinearOut(self.ln_out))
-        layers.append(PPHead(self))
-        
-        return layers
-    
-    def from_layers(self, layers: List[nn.Module]):
-        """load weights from a checkpointed deepspeed pipeline module layers"""
-        pp_emb: PPEmbedding = layers[0]
-        pp_emb.update(self)
-        
-        blocks_num = len(self.blocks)
-        for i, pp_block in enumerate(layers[1: blocks_num + 1]):
-            self.blocks[i] = pp_block.to_block()
-        
-        pp_ln_out: PPLinearOut = layers[1 + blocks_num]
-        self.ln_out = pp_ln_out.to_ln()
-        
-        pp_head: PPHead = layers[-1]
-        pp_head.update(self)
-    
     def forward(self, idx):
         args = self.args
         B, T = idx.size()
