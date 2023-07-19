@@ -438,7 +438,7 @@ class PPEmbedding(nn.Embedding):
             args.tiny_att_dim,
             args.head_qk,
             args.vocab_size,
-            args.n_embed
+            args.n_embd
         )
     
     def __init__(
