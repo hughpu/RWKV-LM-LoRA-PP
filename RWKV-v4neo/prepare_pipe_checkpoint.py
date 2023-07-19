@@ -45,6 +45,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_dropout", default=0.01, type=float)
     parser.add_argument("--lora_parts", default="att,ln,time", type=str)
 
+    parser.add_argument("--grad_cp", default=0, type=int)  # gradient checkpt: saves VRAM, but slower
     parser.add_argument("--precision", default="bf16", type=str)
     
     args = parser.parse_args()
@@ -56,6 +57,10 @@ if __name__ == "__main__":
     os.environ["RWKV_T_MAX"] = str(args.ctx_len)
 
     assert args.precision in ["fp32", "tf32", "fp16", "bf16"]
+    if args.precision == "fp16":
+        torch.set_default_dtype(torch.float16)
+    elif args.precision == "bf16":
+        torch.set_default_dtype(torch.bfloat16)
     os.environ["RWKV_FLOAT_MODE"] = args.precision
 
     from src.model import RWKV, RWKVPipe, LORA_CONFIG
@@ -78,6 +83,9 @@ if __name__ == "__main__":
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
 
     model = RWKV(args)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     print("got plain rwkv model from args.")
 
     if args.lora:
@@ -105,11 +113,15 @@ if __name__ == "__main__":
                 load_dict[k] = model.state_dict()[k]
 
     model.load_state_dict(load_dict, strict=(not args.lora))
+    del load_dict
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
     print("loaded pretrained parameters into rwkv model.")
     
-    del load_dict
-    gc.collect()
-    
+    # mock distributed env
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
     deepspeed.init_distributed()
     print("init dstributed environment.")
     
