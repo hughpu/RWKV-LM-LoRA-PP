@@ -4,11 +4,13 @@ author: hughpu@hotmail.com
 """
 
 import os
+# use cpu large ram to do this job
+# os.environ['DS_ACCELERATOR'] = "cpu"
+
 from argparse import ArgumentParser
 
 import torch
-
-from src.model import RWKV, RWKVPipe, LORA_CONFIG
+import deepspeed
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -41,11 +43,28 @@ if __name__ == "__main__":
     parser.add_argument("--lora_alpha", default=32, type=float)
     parser.add_argument("--lora_dropout", default=0.01, type=float)
     parser.add_argument("--lora_parts", default="att,ln,time", type=str)
+
+    parser.add_argument("--precision", default="bf16", type=str)
     
     args = parser.parse_args()
+    
+    os.environ["RWKV_JIT_ON"] = "1"
+    if args.lora and args.grad_cp == 1:
+        print('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
+        os.environ["RWKV_JIT_ON"] = "0"
+    os.environ["RWKV_T_MAX"] = str(args.ctx_len)
+
+    assert args.precision in ["fp32", "tf32", "fp16", "bf16"]
+    os.environ["RWKV_FLOAT_MODE"] = args.precision
+
+    from src.model import RWKV, RWKVPipe, LORA_CONFIG
 
     load_dict = torch.load(args.load_model, map_location="cpu")
 
+    if args.dim_att <= 0:
+        args.dim_att = args.n_embd
+    if args.dim_ffn <= 0:
+        args.dim_ffn = args.n_embd * 4
     model = RWKV(args)
 
     # only train lora parameters
@@ -82,6 +101,8 @@ if __name__ == "__main__":
                 load_dict[k] = model.state_dict()[k]
 
     model.load_state_dict(load_dict, strict=(not args.lora))
+    
+    deepspeed.init_distributed()
     
     pipe_model = RWKVPipe(args, num_stages=1)
     pipe_model.load_state_from_rwkv(model)
