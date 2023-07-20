@@ -530,6 +530,7 @@ class PPHead(nn.Module):
         vocab_size: int,
         ctx_len: int
     ):
+        super().__init__()
         self.head_qk = head_qk
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
         
