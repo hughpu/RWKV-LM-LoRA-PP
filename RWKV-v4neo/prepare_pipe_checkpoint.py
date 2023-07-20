@@ -14,6 +14,7 @@ import logging
 import torch
 import deepspeed
 from deepspeed.constants import TORCH_DISTRIBUTED_DEFAULT_PORT
+from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 LOG = logging.getLogger(__name__)
 
@@ -140,8 +141,5 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    if not os.path.exists(args.proj_dir):
-        os.makedirs(args.proj_dir)
-    
-    pipe_model.save_state_dict(save_dir=args.proj_dir)
+    pipe_model.save_state_dict(save_dir=args.proj_dir, checkpoint_engine=TorchCheckpointEngine())
     LOG.info(f"successfuly saved pretrained rwkv in pipeline mode checkpoints under {args.proj_dir}.")
