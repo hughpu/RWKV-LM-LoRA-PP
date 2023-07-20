@@ -144,3 +144,6 @@ dmypy.json
 
 # ide
 .vscode
+
+# checkpoint
+**/out
