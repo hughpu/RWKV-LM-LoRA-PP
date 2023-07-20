@@ -534,7 +534,7 @@ class PPHead(nn.Module):
         self.head_qk = head_qk
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
         
-        self.is_involve_head_qk = self.head_k > 0
+        self.is_involve_head_qk = self.head_qk > 0
         if self.is_involve_head_qk:
             self.head_q = nn.Linear(n_embd, head_qk, bias=False)
             self.head_k = nn.Linear(n_embd, head_qk, bias=False)
