@@ -141,5 +141,6 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    pipe_model.checkpoint_parallel_write_pipeline = False
     pipe_model.save_state_dict(save_dir=args.proj_dir, checkpoint_engine=TorchCheckpointEngine())
     LOG.info(f"successfuly saved pretrained rwkv in pipeline mode checkpoints under {args.proj_dir}.")
