@@ -9,9 +9,13 @@ import gc
 # os.environ['DS_ACCELERATOR'] = "cpu"
 
 from argparse import ArgumentParser
+import logging
 
 import torch
 import deepspeed
+from deepspeed.constants import TORCH_DISTRIBUTED_DEFAULT_PORT
+
+LOG = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -52,7 +56,7 @@ if __name__ == "__main__":
     
     os.environ["RWKV_JIT_ON"] = "1"
     if args.lora and args.grad_cp == 1:
-        print('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
+        LOG.info('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
         os.environ["RWKV_JIT_ON"] = "0"
     os.environ["RWKV_T_MAX"] = str(args.ctx_len)
 
@@ -64,8 +68,6 @@ if __name__ == "__main__":
     os.environ["RWKV_FLOAT_MODE"] = args.precision
 
     from src.model import RWKV, RWKVPipe, LORA_CONFIG
-
-    load_dict = torch.load(args.load_model, map_location="cpu")
 
     if args.dim_att <= 0:
         args.dim_att = args.n_embd
@@ -86,26 +88,27 @@ if __name__ == "__main__":
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    print("got plain rwkv model from args.")
+    LOG.info("got plain rwkv model from args.")
 
     if args.lora:
         model.requires_grad_(False)
         for name, module in model.named_modules():
             # have to check param name since it may have been wrapped by torchscript
             if any(n.startswith("lora_") for n, _ in module.named_parameters()):
-                print(f'  LoRA training module {name}')
+                LOG.info(f'  LoRA training module {name}')
                 for pname, param in module.named_parameters():
                     param.requires_grad = 'lora_' in pname
             elif enable_ln_finetune and '.ln' in name:
-                print(f'  LoRA additionally training module {name}')
+                LOG.info(f'  LoRA additionally training module {name}')
                 for param in module.parameters():
                     param.requires_grad = True
             elif enable_time_finetune and any(n.startswith("time") for n, _ in module.named_parameters()):
                 for pname, param in module.named_parameters():
                     if pname.startswith("time"):
-                        print(f'  LoRA additionally training parameter {pname}')
+                        LOG.info(f'  LoRA additionally training parameter {pname}')
                         param.requires_grad = True
 
+    load_dict = torch.load(args.load_model, map_location="cpu")
     if args.load_partial == 1:
         load_keys = load_dict.keys()
         for k in model.state_dict():
@@ -114,26 +117,31 @@ if __name__ == "__main__":
 
     model.load_state_dict(load_dict, strict=(not args.lora))
     del load_dict
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    gc.collect()
-    print("loaded pretrained parameters into rwkv model.")
+    LOG.info("loaded pretrained parameters into rwkv model.")
     
     # mock distributed env
     os.environ["RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
-    deepspeed.init_distributed()
-    print("init dstributed environment.")
+    os.environ["MASTER_PORT"] = str(TORCH_DISTRIBUTED_DEFAULT_PORT)
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["LOCAL_RANK"] = "0"
+    deepspeed.init_distributed(auto_mpi_discovery=False)
+    LOG.info("init dstributed environment.")
     
     pipe_model = RWKVPipe(args, num_stages=1)
     pipe_model.load_state_from_rwkv(model)
-    print("shifted model parameters from rwkv to its pipeline module.")
+    LOG.info("shifted model parameters from rwkv to its pipeline module.")
     
     del model
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     if not os.path.exists(args.proj_dir):
         os.makedirs(args.proj_dir)
     
     pipe_model.save_state_dict(save_dir=args.proj_dir)
-    print(f"successfuly saved pretrained rwkv in pipeline mode checkpoints under {args.proj_dir}.")
+    LOG.info(f"successfuly saved pretrained rwkv in pipeline mode checkpoints under {args.proj_dir}.")
