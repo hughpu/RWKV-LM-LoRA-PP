@@ -888,6 +888,14 @@ class RWKVPipe(PipelineModule):
         args: Namespace,
         num_stages: int
     ):
+        if not hasattr(args, 'dim_att'):
+            args.dim_att = args.n_embd
+        if not hasattr(args, 'dim_ffn'):
+            args.dim_ffn = args.n_embd * 4
+        if not hasattr(args, 'tiny_att_layer'):
+            args.tiny_att_layer = -1
+        if not hasattr(args, 'tiny_att_dim'):
+            args.tiny_att_dim = -1
 
         layer_specs = []
         layer_specs.append(PPEmbedding.get_spec_from_rwkv_args(args))
