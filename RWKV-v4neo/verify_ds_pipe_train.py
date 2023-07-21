@@ -8,7 +8,9 @@ import os, sys, types
 import numpy as np
 import torch
 import deepspeed
+import gc
 from deepspeed.constants import TORCH_DISTRIBUTED_DEFAULT_PORT
+from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 np.set_printoptions(precision=4, suppress=True, linewidth=200)
 try:
     os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[1]
@@ -28,9 +30,9 @@ if TOKEN_MODE == 'pile':
     WORD_NAME = ['20B_tokenizer.json', '20B_tokenizer.json']
     PIPE_MODEL_DIR = '/home/hughpu/data/models/RWKV-4-Pile-3B-20220910-165-Pipe'
     MODEL_NAME = '/home/hughpu/data/models/RWKV-4-Pile-3B-20220910-165'
-    n_layer = 40
-    n_embd = 5120
-    ctx_len = 4096
+    n_layer = 32
+    n_embd = 2560
+    ctx_len = 1024
     UNKNOWN_CHAR = None
 
 from src.utils import TOKENIZER
@@ -58,20 +60,29 @@ args.head_qk = 0
 args.pre_ffn = 0
 args.grad_cp = 0
 args.my_pos_emb = 0
-rwkv_org = RWKV(args).to(RUN_DEVICE)
 
-print('loading ' + MODEL_NAME)
-rwkv_ckpt = torch.load(MODEL_NAME + '.pth', map_location='cpu')
-rwkv_org.load_state_dict(rwkv_ckpt)
+def get_rwkv_org(args):
+    rwkv_org = RWKV(args).to(RUN_DEVICE)
+    
+    print('loading ' + MODEL_NAME)
+    rwkv_ckpt = torch.load(MODEL_NAME + '.pth', map_location='cpu')
+    rwkv_org.load_state_dict(rwkv_ckpt, strict=False)
+    return rwkv_org
 
-os.environ["RANK"] = "0"
-os.environ["WORLD_SIZE"] = "1"
-os.environ["MASTER_PORT"] = str(TORCH_DISTRIBUTED_DEFAULT_PORT)
-os.environ["MASTER_ADDR"] = "127.0.0.1"
-os.environ["LOCAL_RANK"] = "0"
-deepspeed.init_distributed(auto_mpi_discovery=False)
-rwkv_pipe = RWKVPipe(args, num_stages=1)
-rwkv_pipe.load_state_dir(PIPE_MODEL_DIR)
+def get_rwkv_pipe(args):
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ["MASTER_PORT"] = str(TORCH_DISTRIBUTED_DEFAULT_PORT)
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["LOCAL_RANK"] = "0"
+    deepspeed.init_distributed(auto_mpi_discovery=False)
+    rwkv_pipe = RWKVPipe(args, num_stages=1)
+    rwkv_pipe.load_state_dir(
+        PIPE_MODEL_DIR,
+        TorchCheckpointEngine(),
+        strict=False
+    )
+    return rwkv_pipe
 
 ########################################################################################################
 
@@ -88,9 +99,15 @@ print(f'input len {len(ctx)} data {ctx}')
 
 with torch.no_grad():
     print('\nRWKV-Origin output')
+    rwkv_org = get_rwkv_org(args)
     out = rwkv_org.forward(torch.tensor([ctx]).to(RUN_DEVICE))[0].detach().cpu().float().numpy()
     print(out, '\n')
+    
+    del rwkv_org
+    gc.collect()
+    torch.cuda.empty_cache()
 
     print('\nRWKV-Pipe output')
+    rwkv_pipe = get_rwkv_pipe(args)
     out = rwkv_pipe.forward(torch.tensor([ctx]).to(RUN_DEVICE))[0].detach().cpu().float().numpy()
     print(out, '\n')
