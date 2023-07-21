@@ -543,8 +543,8 @@ class PPHead(nn.Module):
         
     def forward(self, inputs: TT) -> torch.Tensor:
         x, idx = inputs
-        _, T = idx.size()
         if self.head_qk > 0:
+            _, T = idx.size()
             q = self.head_q(x)[:, :T, :]
             k = self.head_k(x)[:, :T, :]
             c = (q @ k.transpose(-2, -1)) * (1.0 / self.head_qk)
