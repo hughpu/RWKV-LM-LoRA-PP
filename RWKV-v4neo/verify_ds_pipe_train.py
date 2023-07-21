@@ -26,8 +26,8 @@ TOKEN_MODE = 'pile'
 
 if TOKEN_MODE == 'pile':
     WORD_NAME = ['20B_tokenizer.json', '20B_tokenizer.json']
-    PIPE_MODEL_DIR = '/home/hughpu/data/model/RWKV-4-Pile-3B-20220910-165-Pipe'
-    MODEL_NAME = '/home/hughpu/data/model/RWKV-4-Pile-3B-20220910-165'
+    PIPE_MODEL_DIR = '/home/hughpu/data/models/RWKV-4-Pile-3B-20220910-165-Pipe'
+    MODEL_NAME = '/home/hughpu/data/models/RWKV-4-Pile-3B-20220910-165'
     n_layer = 40
     n_embd = 5120
     ctx_len = 4096
