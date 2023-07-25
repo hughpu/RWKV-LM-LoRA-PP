@@ -308,7 +308,7 @@ if __name__ == "__main__":
     deepspeed.init_distributed(dist_backend=args.backend)
     ########################################################################################################
 
-    from src.dataset import MyDataset
+    from src.dataset import PipeDataset
     from src.model import RWKVPipe, LORA_CONFIG, LoraLinear
     from src.trainer import train_callback, generate_init_weight
 
@@ -324,7 +324,7 @@ if __name__ == "__main__":
     pipe_module = RWKVPipe(args)
 
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
-    trainset = MyDataset(args)
+    trainset = PipeDataset(args) if need_to_load_data else None
     # only train lora parameters
     if args.lora:
         pipe_module.requires_grad_(False)
