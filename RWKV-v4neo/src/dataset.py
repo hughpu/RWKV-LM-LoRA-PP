@@ -10,6 +10,8 @@ from pytorch_lightning.utilities import rank_zero_info
 from .binidx import MMapIndexedDataset
 from .utils import MaybeIsPrime
 
+from argparse import Namespace
+
 
 class MyDataset(Dataset):
     def __init__(self, args):
@@ -222,3 +224,22 @@ class MyDataset(Dataset):
                     return x, y, z
 
             return x, y
+
+class PipeDataset(MyDataset):
+    def __init__(self, args):
+        super().__init__(args)
+        # global_rank in unnessary in lora customized training corpus case
+        # just make sure the stage 0 and stage -1 of pipeline parallelism can load same data with pile corpus
+        self.global_rank = 0
+
+        # world_size in unnessary in lora customized training corpus case
+        # just make sure the stage 0 and stage -1 of pipeline parallelism can load same data with pile corpus
+        self.world_size = 1
+        
+        # TODO: modified the real_epoch_setting according to args and other properties of `self` in the future to support pile corpus
+        self.real_epoch = 10
+        
+        self._len = (self.data_size - 1) // self.args.ctx_len + 1
+
+    def __len__(self):
+        return self._len
