@@ -5,7 +5,8 @@ import logging
 from argparse import ArgumentParser
 
 import deepspeed
-from deepspeed import dist
+from deepspeed import dist, DeepSpeedConfig
+from deepspeed.runtime.config import ZeroStageEnum
 
 LOG = logging.getLogger(__file__)
 
@@ -148,6 +149,11 @@ if __name__ == "__main__":
 
     args = get_args()
 
+    deepspeed.init_distributed(
+        dist_backend=args.backend,
+        config=args.deepspeed_config
+    )
+    deepspeed_config = DeepSpeedConfig(args.deepspeed_config)
 
     rank_zero_info("########## work in progress ##########")
 
@@ -174,10 +180,12 @@ if __name__ == "__main__":
     args.gradient_clip_val = 1.0
     args.num_sanity_val_steps = 0
     args.check_val_every_n_epoch = int(1e20)
-    args.log_every_n_steps = int(1e20)
+    args.log_every_n_steps = deepspeed_config.steps_per_print
     args.max_epochs = -1  # continue forever
-    args.betas = (args.beta1, args.beta2)
-    args.real_bsz = int(args.num_nodes) * int(args.devices) * args.micro_bsz
+    
+    optimizer_params = deepspeed_config.optimizer_params
+    args.betas = tuple(optimizer_params["betas"])
+    args.real_bsz = deepspeed_config.train_batch_size
     os.environ["RWKV_T_MAX"] = str(args.ctx_len)
     os.environ["RWKV_MY_TESTING"] = args.my_testing
     if args.dim_att <= 0:
@@ -240,11 +248,15 @@ if __name__ == "__main__":
 
     samples_per_epoch = args.epoch_steps * args.real_bsz
     tokens_per_epoch = samples_per_epoch * args.ctx_len
+
+    float_mode = 'fp16' if deepspeed_config.fp16_enabled else 'fp32'
+    float_mode = 'bf16' if deepspeed_config.bfloat16_enabled else float_mode
+
     rank_zero_info(
         f"""
 ############################################################################
 #
-# RWKV-4 {args.precision.upper()} on {args.num_nodes}x{args.devices} {args.accelerator.upper()}, bsz {args.num_nodes}x{args.devices}x{args.micro_bsz}={args.real_bsz}, {args.strategy} {'with grad_cp' if args.grad_cp > 0 else ''}
+# RWKV-4 {float_mode.upper()} on {args.num_nodes}x{args.devices} {args.accelerator.upper()}, bsz {args.num_nodes}x{args.devices}x{args.micro_bsz}={args.real_bsz}, {args.strategy} {'with grad_cp' if args.grad_cp > 0 else ''}
 #
 # Data = {args.data_file} ({args.data_type}), ProjDir = {args.proj_dir}
 #
@@ -270,19 +282,18 @@ if __name__ == "__main__":
     if args.lr_final == 0 or args.lr_init == 0:
         rank_zero_info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")
 
-    assert args.precision in ["fp32", "tf32", "fp16", "bf16"]
-    os.environ["RWKV_FLOAT_MODE"] = args.precision
-    if args.precision == "fp32":
+    os.environ["RWKV_FLOAT_MODE"] = float_mode
+    if float_mode == "fp32":
         for i in range(10):
             rank_zero_info("\n\nNote: you are using fp32 (very slow). Try bf16 / tf32 for faster training.\n\n")
-    if args.precision == "fp16":
+    if float_mode == "fp16":
         rank_zero_info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
         torch.set_default_dtype(torch.float16)
-    if args.precision == "bf16":
+    if float_mode == "bf16":
         torch.set_default_dtype(torch.bfloat16)
 
     os.environ["RWKV_JIT_ON"] = "1"
-    if "deepspeed_stage_3" in args.strategy:
+    if deepspeed_config.zero_optimization_stage == ZeroStageEnum.weights:
         os.environ["RWKV_JIT_ON"] = "0"
     if args.lora and args.grad_cp == 1:
         print('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
@@ -290,22 +301,13 @@ if __name__ == "__main__":
 
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
-    if args.precision == "fp32":
+    if float_mode == "fp32":
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.matmul.allow_tf32 = False
     else:
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    if "32" in args.precision:
-        args.precision = 32
-        torch.set_default_dtype(torch.float32)
-    elif args.precision == "fp16":
-        args.precision = 16
-    else:
-        args.precision = "bf16"
-
-    deepspeed.init_distributed(dist_backend=args.backend)
     ########################################################################################################
 
     from src.dataset import PipeDataset
@@ -365,8 +367,14 @@ if __name__ == "__main__":
     assert isinstance(pipe_engine, deepspeed.PipelineEngine)
     
     dist.get_world_size()
+    train_batch_size = pipe_engine.train_batch_size()
     grad_acc_steps = pipe_engine.gradient_accumulation_steps()
     micro_batch_size = pipe_engine.train_micro_batch_size_per_gpu()
+    
+    # tuned the arguments since they are not required to config at the same time
+    grad_acc_steps = max(grad_acc_steps, train_batch_size // micro_batch_size)
+    micro_batch_size = min(micro_batch_size, train_batch_size // grad_acc_steps)
+
     if (args.lr_init > 1e-4 or WORLD_SIZE * grad_acc_steps * micro_batch_size < 8):
         if 'I_KNOW_WHAT_IM_DOING' in os.environ:
             rank_zero_info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')

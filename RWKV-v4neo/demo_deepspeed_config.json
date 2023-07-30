@@ -1,0 +1,19 @@
+{
+    "train_batch_size": 4,
+    "gradient_accumulation_steps": 1,
+    "optimizer": {
+        "type": "Adam",
+        "params": {
+            "lr": 1e-5,
+            "betas": [
+                0.9,
+                0.999
+            ],
+            "eps": 1e-8
+        }
+    },
+    "bf16": {
+        "enabled": true
+    },
+    "steps_per_print": 20
+}
