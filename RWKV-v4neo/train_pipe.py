@@ -22,19 +22,40 @@ NUM_DEVICES = int(os.environ["LOCAL_SIZE"])
 
 
 class DeltaTorchCheckPointEngine(TorchCheckpointEngine):
-    def __init__(self, config_params=None, save_delta=True):
+    def __init__(
+        self,
+        config_params=None,
+        lora=True,
+        enable_time_finetune=True,
+        enable_ln_finetune=True
+    ):
         super().__init__(config_params)
-        self._save_delta = save_delta
+        self._lora = lora
+        self._enable_time_finetune = enable_time_finetune
+        self._enable_ln_finetune = enable_ln_finetune 
 
     def save(self, state_dict: dict, path: str):
         is_layer_module = "layer" in path and "model_state" in path
-        if self._save_delta and isinstance(state_dict, dict) and is_layer_module:
+        if is_layer_module and self._lora and isinstance(state_dict, dict):
             state_dict = {
                 mod_path: param
-                for mod_path, param in state_dict
-                if param.requires_grad
+                for mod_path, param in state_dict.items()
+                if self.is_modpath_delta(mod_path)
             }
         return super().save(state_dict, path)
+    
+    def is_modpath_delta(self, mod_path):
+        if "lora_" in mod_path:
+            return True
+        
+        if self._enable_time_finetune and ".ln" in mod_path:
+            return True
+        
+        if self._enable_ln_finetune and "time_" in mod_path:
+            return True
+
+        return False
+
 
 
 def rank_zero_info(info: str):
@@ -336,6 +357,9 @@ if __name__ == "__main__":
     from src.dataset import PipeDataset
     from src.model import RWKVPipe, LORA_CONFIG
 
+    lora=args.lora
+    enable_time_finetune=False
+    enable_ln_finetune=False
     if args.lora:
         assert args.lora_r > 0, "LoRA should have its `r` > 0"
         LORA_CONFIG["r"] = args.lora_r
@@ -398,7 +422,11 @@ if __name__ == "__main__":
     )
     
     assert isinstance(pipe_engine, deepspeed.PipelineEngine)
-    pipe_engine.checkpoint_engine = DeltaTorchCheckPointEngine(save_delta=args.lora)
+    pipe_engine.checkpoint_engine = DeltaTorchCheckPointEngine(
+        lora=args.lora,
+        enable_ln_finetune=enable_ln_finetune,
+        enable_time_finetune=enable_time_finetune
+    )
     
     train_batch_size = pipe_engine.train_batch_size()
     grad_acc_steps = pipe_engine.gradient_accumulation_steps()
@@ -432,13 +460,13 @@ if __name__ == "__main__":
             rank_zero_info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
             exit(0)
 
-    for n in pipe_module.state_dict():
-        shape = pipe_module.state_dict()[n].shape
+    for name, param in pipe_module.state_dict().items():
+        shape = param.shape
         shape = [i for i in shape if i != 1]
         if len(shape) > 1:
-            print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)} {n}")
+            print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)} {name}")
         else:
-            print(f"{str(shape[0]).ljust(5)}       {n}")
+            print(f"{str(shape[0]).ljust(5)}       {name}")
 
 
     save_every_steps = 100
