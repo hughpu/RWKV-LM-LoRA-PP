@@ -20,9 +20,27 @@ WORLD_SIZE = int(os.environ["WORLD_SIZE"])
 NUM_NODES = int(os.environ["CROSS_SIZE"])
 NUM_DEVICES = int(os.environ["LOCAL_SIZE"])
 
+
+class DeltaTorchCheckPointEngine(TorchCheckpointEngine):
+    def __init__(self, config_params=None, save_delta=True):
+        super().__init__(config_params)
+        self._save_delta = save_delta
+
+    def save(self, state_dict: dict, path: str):
+        is_layer_module = "layer" in path and "model_state" in path
+        if self._save_delta and isinstance(state_dict, dict) and is_layer_module:
+            state_dict = {
+                mod_path: param
+                for mod_path, param in state_dict
+                if param.requires_grad
+            }
+        return super().save(state_dict, path)
+
+
 def rank_zero_info(info: str):
     if GLOBAL_RANK == 0:
         LOG.info(info)
+
 
 def get_args():
     parser = ArgumentParser(description='RWKV Pipeline Parallelism Training')
@@ -331,24 +349,6 @@ if __name__ == "__main__":
 
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
     trainset = PipeDataset(args) if need_to_load_data else None
-    # only train lora parameters
-    if args.lora:
-        pipe_module.requires_grad_(False)
-        for name, module in pipe_module.named_modules():
-            # have to check param name since it may have been wrapped by torchscript
-            if any(n.startswith("lora_") for n, _ in module.named_parameters()):
-                LOG.info(f'  LoRA training module {name}')
-                for pname, param in module.named_parameters():
-                    param.requires_grad = 'lora_' in pname
-            elif enable_ln_finetune and '.ln' in name:
-                LOG.info(f'  LoRA additionally training module {name}')
-                for param in module.parameters():
-                    param.requires_grad = True
-            elif enable_time_finetune and any(n.startswith("time") for n, _ in module.named_parameters()):
-                for pname, param in module.named_parameters():
-                    if pname.startswith("time"):
-                        LOG.info(f'  LoRA additionally training parameter {pname}')
-                        param.requires_grad = True
 
     rank_zero_info(f"########## Loading {args.load_model}... ##########")
     try:
@@ -369,6 +369,25 @@ if __name__ == "__main__":
             checkpoint_engine=TorchCheckpointEngine()
         )
 
+    # only train lora parameters
+    if args.lora:
+        pipe_module.requires_grad_(False)
+        for name, module in pipe_module.named_modules():
+            # have to check param name since it may have been wrapped by torchscript
+            if any(n.startswith("lora_") for n, _ in module.named_parameters()):
+                LOG.info(f'  LoRA training module {name}')
+                for pname, param in module.named_parameters():
+                    param.requires_grad = 'lora_' in pname
+            elif enable_ln_finetune and '.ln' in name:
+                LOG.info(f'  LoRA additionally training module {name}')
+                for param in module.parameters():
+                    param.requires_grad = True
+            elif enable_time_finetune and any(n.startswith("time") for n, _ in module.named_parameters()):
+                for pname, param in module.named_parameters():
+                    if pname.startswith("time"):
+                        LOG.info(f'  LoRA additionally training parameter {pname}')
+                        param.requires_grad = True
+
     trainable_parameters = [p for p in pipe_module.parameters() if p.requires_grad]
     LOG.info(f"trainable parameter size is {sum(p.size().numel() for p in trainable_parameters)}")
     pipe_engine, optimizer, _, _ = deepspeed.initialize(
@@ -379,6 +398,7 @@ if __name__ == "__main__":
     )
     
     assert isinstance(pipe_engine, deepspeed.PipelineEngine)
+    pipe_engine.checkpoint_engine = DeltaTorchCheckPointEngine(save_delta=args.lora)
     
     train_batch_size = pipe_engine.train_batch_size()
     grad_acc_steps = pipe_engine.gradient_accumulation_steps()
