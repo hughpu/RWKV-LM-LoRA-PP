@@ -6,12 +6,18 @@ from argparse import ArgumentParser
 
 import deepspeed
 from deepspeed import dist, DeepSpeedConfig
+from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.config import ZeroStageEnum
+from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
+
+import os
 
 LOG = logging.getLogger(__file__)
 
 GLOBAL_RANK = os.environ["RANK"]
 WORLD_SIZE = os.environ["WORLD_SIZE"]
+NUM_NODES = os.environ["CROSS_SIZE"]
+NUM_DEVICES = os.environ["LOCAL_SIZE"]
 
 def rank_zero_info(info: str):
     if GLOBAL_RANK == "0":
@@ -29,7 +35,7 @@ def get_args():
                         default=100,
                         help='quit after this many steps')
     parser.add_argument('-p',
-                        '--pipeline-parallel-size',
+                        '--pipeline_parallel_size',
                         type=int,
                         default=2,
                         help='pipeline parallelism')
@@ -53,7 +59,6 @@ def get_args():
     parser.add_argument("--epoch_begin", default=0, type=int)  # if you load a model trained for x "epochs", set epoch_begin = x
     parser.add_argument("--epoch_save", default=5, type=int)  # save the model every [epoch_save] "epochs"
 
-    parser.add_argument("--micro_bsz", default=12, type=int)  # micro batch size (batch size per GPU)
     parser.add_argument("--n_layer", default=6, type=int)
     parser.add_argument("--n_embd", default=512, type=int)
     parser.add_argument("--dim_att", default=0, type=int)
@@ -62,13 +67,6 @@ def get_args():
     parser.add_argument("--head_qk", default=0, type=int)  # my headQK trick
     parser.add_argument("--tiny_att_dim", default=0, type=int)  # tiny attention dim
     parser.add_argument("--tiny_att_layer", default=-999, type=int)  # tiny attention @ which layer
-
-    parser.add_argument("--lr_init", default=6e-4, type=float)  # 6e-4 for L12-D768, 4e-4 for L24-D1024, 3e-4 for L24-D2048
-    parser.add_argument("--lr_final", default=1e-5, type=float)
-    parser.add_argument("--warmup_steps", default=0, type=int)  # try 50 if you load a model
-    parser.add_argument("--beta1", default=0.9, type=float)
-    parser.add_argument("--beta2", default=0.99, type=float)  # use 0.999 when your model is close to convergence
-    parser.add_argument("--adam_eps", default=1e-8, type=float)
 
     parser.add_argument("--grad_cp", default=0, type=int)  # gradient checkpt: saves VRAM, but slower
     parser.add_argument("--my_pile_stage", default=0, type=int)  # my special pile mode
@@ -150,8 +148,7 @@ if __name__ == "__main__":
     args = get_args()
 
     deepspeed.init_distributed(
-        dist_backend=args.backend,
-        config=args.deepspeed_config
+        dist_backend=args.backend
     )
     deepspeed_config = DeepSpeedConfig(args.deepspeed_config)
 
@@ -186,6 +183,14 @@ if __name__ == "__main__":
     optimizer_params = deepspeed_config.optimizer_params
     args.betas = tuple(optimizer_params["betas"])
     args.real_bsz = deepspeed_config.train_batch_size
+    args.lr_init = args.lr_final = float(optimizer_params["lr"])
+    args.adam_eps = optimizer_params["eps"]
+    
+    scheduler_params = deepspeed_config.scheduler_params
+    args.warmup_steps = scheduler_params["warmup_num_steps"] if scheduler_params else 0
+
+    args.accelerator = get_accelerator()._name.upper()
+
     os.environ["RWKV_T_MAX"] = str(args.ctx_len)
     os.environ["RWKV_MY_TESTING"] = args.my_testing
     if args.dim_att <= 0:
@@ -256,7 +261,7 @@ if __name__ == "__main__":
         f"""
 ############################################################################
 #
-# RWKV-4 {float_mode.upper()} on {args.num_nodes}x{args.devices} {args.accelerator.upper()}, bsz {args.num_nodes}x{args.devices}x{args.micro_bsz}={args.real_bsz}, {args.strategy} {'with grad_cp' if args.grad_cp > 0 else ''}
+# RWKV-4 {float_mode.upper()} on {NUM_NODES}x{NUM_DEVICES} {args.accelerator}, bsz {deepspeed_config.train_batch_size}, zero: {deepspeed_config.zero_optimization_stage} {'with grad_cp' if args.grad_cp > 0 else ''}
 #
 # Data = {args.data_file} ({args.data_type}), ProjDir = {args.proj_dir}
 #
@@ -270,7 +275,6 @@ if __name__ == "__main__":
 # Adam = lr {args.lr_init} to {args.lr_final}, warmup {args.warmup_steps} steps, beta {args.betas}, eps {args.adam_eps}
 #
 # Found torch {torch.__version__}, recommend 1.13.1+cu117 or newer
-# Found deepspeed {deepspeed.__version__ if importlib.util.find_spec('deepspeed') else 'None'}, recommend 0.9.3 or newer
 #
 ############################################################################
 """
@@ -296,7 +300,7 @@ if __name__ == "__main__":
     if deepspeed_config.zero_optimization_stage == ZeroStageEnum.weights:
         os.environ["RWKV_JIT_ON"] = "0"
     if args.lora and args.grad_cp == 1:
-        print('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
+        LOG.warn('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
         os.environ["RWKV_JIT_ON"] = "0"
 
     torch.backends.cudnn.benchmark = True
@@ -311,8 +315,7 @@ if __name__ == "__main__":
     ########################################################################################################
 
     from src.dataset import PipeDataset
-    from src.model import RWKVPipe, LORA_CONFIG, LoraLinear
-    from src.trainer import train_callback, generate_init_weight
+    from src.model import RWKVPipe, LORA_CONFIG
 
     if args.lora:
         assert args.lora_r > 0, "LoRA should have its `r` > 0"
@@ -323,7 +326,7 @@ if __name__ == "__main__":
         enable_time_finetune = 'time' in LORA_CONFIG["parts"]
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
 
-    pipe_module = RWKVPipe(args)
+    pipe_module = RWKVPipe(args, num_stages=args.pipeline_parallel_size)
 
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
     trainset = PipeDataset(args) if need_to_load_data else None
@@ -333,40 +336,49 @@ if __name__ == "__main__":
         for name, module in pipe_module.named_modules():
             # have to check param name since it may have been wrapped by torchscript
             if any(n.startswith("lora_") for n, _ in module.named_parameters()):
-                print(f'  LoRA training module {name}')
+                LOG.info(f'  LoRA training module {name}')
                 for pname, param in module.named_parameters():
                     param.requires_grad = 'lora_' in pname
             elif enable_ln_finetune and '.ln' in name:
-                print(f'  LoRA additionally training module {name}')
+                LOG.info(f'  LoRA additionally training module {name}')
                 for param in module.parameters():
                     param.requires_grad = True
             elif enable_time_finetune and any(n.startswith("time") for n, _ in module.named_parameters()):
                 for pname, param in module.named_parameters():
                     if pname.startswith("time"):
-                        print(f'  LoRA additionally training parameter {pname}')
+                        LOG.info(f'  LoRA additionally training parameter {pname}')
                         param.requires_grad = True
 
     rank_zero_info(f"########## Loading {args.load_model}... ##########")
     try:
-        pipe_module.load_state_dir(args.load_model, strict=(not args.lora))
+        pipe_module.load_state_dir(
+            args.load_model,
+            strict=(not args.lora),
+            checkpoint_engine=TorchCheckpointEngine()
+        )
     except:
         rank_zero_info(f"Bad checkpoint {args.load_model}")
         exit(1)
 
     # If using LoRA, the LoRA keys might be missing in the original model
-    if os.path.isfile(args.lora_load):
-        pipe_module.load_state_dir(args.lora_load, strict=False)
+    if os.path.isdir(args.lora_load):
+        pipe_module.load_state_dir(
+            args.lora_load,
+            strict=False,
+            checkpoint_engine=TorchCheckpointEngine()
+        )
 
+    trainable_parameters = [p for p in pipe_module.parameters() if p.requires_grad]
+    LOG.info(f"trainable parameter size is {sum(p.size().numel() for p in trainable_parameters)}")
     pipe_engine, optimizer, _, _ = deepspeed.initialize(
         args=args,
         model=pipe_module,
-        model_parameters=[p for p in pipe_module.parameters() if p.requires_grad],
+        model_parameters=trainable_parameters,
         training_data=trainset
     )
     
     assert isinstance(pipe_engine, deepspeed.PipelineEngine)
     
-    dist.get_world_size()
     train_batch_size = pipe_engine.train_batch_size()
     grad_acc_steps = pipe_engine.gradient_accumulation_steps()
     micro_batch_size = pipe_engine.train_micro_batch_size_per_gpu()
