@@ -6,21 +6,22 @@ from argparse import ArgumentParser
 
 import deepspeed
 from deepspeed import dist, DeepSpeedConfig
+from deepspeed.utils.logging import LoggerFactory
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.config import ZeroStageEnum
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 import os
 
-LOG = logging.getLogger(__file__)
+LOG = LoggerFactory.create_logger(name="train_pipe", level=logging.INFO)
 
-GLOBAL_RANK = os.environ["RANK"]
-WORLD_SIZE = os.environ["WORLD_SIZE"]
-NUM_NODES = os.environ["CROSS_SIZE"]
-NUM_DEVICES = os.environ["LOCAL_SIZE"]
+GLOBAL_RANK = int(os.environ["RANK"])
+WORLD_SIZE = int(os.environ["WORLD_SIZE"])
+NUM_NODES = int(os.environ["CROSS_SIZE"])
+NUM_DEVICES = int(os.environ["LOCAL_SIZE"])
 
 def rank_zero_info(info: str):
-    if GLOBAL_RANK == "0":
+    if GLOBAL_RANK == 0:
         LOG.info(info)
 
 def get_args():
@@ -183,7 +184,7 @@ if __name__ == "__main__":
     optimizer_params = deepspeed_config.optimizer_params
     args.betas = tuple(optimizer_params["betas"])
     args.real_bsz = deepspeed_config.train_batch_size
-    args.lr_init = args.lr_final = float(optimizer_params["lr"])
+    args.lr_init = args.lr_final = optimizer_params["lr"]
     args.adam_eps = optimizer_params["eps"]
     
     scheduler_params = deepspeed_config.scheduler_params
@@ -386,8 +387,19 @@ if __name__ == "__main__":
     # tuned the arguments since they are not required to config at the same time
     grad_acc_steps = max(grad_acc_steps, train_batch_size // micro_batch_size)
     micro_batch_size = min(micro_batch_size, train_batch_size // grad_acc_steps)
+    rank_zero_info(
+        f"Train batch size: {train_batch_size}, Gradient accumulation steps: {grad_acc_steps}, Micro batch size, {micro_batch_size}."
+    )
+    
+    # 3D parallelism information
+    data_parallelism = pipe_engine.grid.data_parallel_size
+    model_parallelism = pipe_engine.grid.model_parallel_size
+    pipeline_parallelism = pipe_engine.grid.pipe_parallel_size
+    rank_zero_info(
+        f"Data Parallelism: {data_parallelism}, Model Parallelism: {model_parallelism}, Pipeline Parallelism: {pipeline_parallelism}."
+    )
 
-    if (args.lr_init > 1e-4 or WORLD_SIZE * grad_acc_steps * micro_batch_size < 8):
+    if (args.lr_init > 1e-4 or train_batch_size < 8):
         if 'I_KNOW_WHAT_IM_DOING' in os.environ:
             rank_zero_info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
             rank_zero_info(f'  WARNING: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({WORLD_SIZE} * {micro_batch_size} * {grad_acc_steps} < 8)')
@@ -411,6 +423,8 @@ if __name__ == "__main__":
 
     save_every_steps = 100
     for step in range(args.steps):
-        pipe_engine.train_batch()
+        loss = pipe_engine.train_batch()
+        if step % deepspeed_config.steps_per_print == 0:
+            LOG.info(f"training loss: {loss} at step: {step}")
         if step % save_every_steps == 0:
             pipe_engine.save_checkpoint(args.proj_dir)
