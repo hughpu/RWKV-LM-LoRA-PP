@@ -193,8 +193,8 @@ if __name__ == "__main__":
     )
     ppsize = args.pipeline_parallel_size
     assert WORLD_SIZE % ppsize == 0, f"pipeline parallelism {ppsize} and world size {WORLD_SIZE} are not match."
-    typology = PipeDataParallelTopology(num_dp=WORLD_SIZE // ppsize, num_pp=ppsize)
-    mpu = PipelineParallelGrid(typology=typology)
+    topology = PipeDataParallelTopology(num_dp=WORLD_SIZE // ppsize, num_pp=ppsize)
+    mpu = PipelineParallelGrid(topology=topology)
     deepspeed_config = DeepSpeedConfig(args.deepspeed_config, mpu=mpu)
 
     rank_zero_info("########## work in progress ##########")
