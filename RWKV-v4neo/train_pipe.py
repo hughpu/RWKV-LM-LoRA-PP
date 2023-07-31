@@ -5,18 +5,19 @@ import logging
 from argparse import ArgumentParser
 
 import deepspeed
-from deepspeed import dist, DeepSpeedConfig
+from deepspeed import DeepSpeedConfig
+from deepspeed import comm as dist
 from deepspeed.utils.logging import LoggerFactory
-from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.config import ZeroStageEnum
+from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipelineParallelGrid
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 import os
 
 LOG = LoggerFactory.create_logger(name="train_pipe", level=logging.INFO)
 
-GLOBAL_RANK = int(os.environ["RANK"])
-WORLD_SIZE = int(os.environ["WORLD_SIZE"])
+GLOBAL_RANK = dist.get_world_rank_from_launcher()
+WORLD_SIZE = dist.get_world_size_from_launcher()
 NUM_NODES = int(os.environ["CROSS_SIZE"])
 NUM_DEVICES = int(os.environ["LOCAL_SIZE"])
 
@@ -190,16 +191,19 @@ if __name__ == "__main__":
     deepspeed.init_distributed(
         dist_backend=args.backend
     )
-    deepspeed_config = DeepSpeedConfig(args.deepspeed_config)
+    ppsize = args.pipeline_parallel_size
+    assert WORLD_SIZE % ppsize == 0, f"pipeline parallelism {ppsize} and world size {WORLD_SIZE} are not match."
+    typology = PipeDataParallelTopology(num_dp=WORLD_SIZE // ppsize, num_pp=ppsize)
+    mpu = PipelineParallelGrid(typology=typology)
+    deepspeed_config = DeepSpeedConfig(args.deepspeed_config, mpu=mpu)
 
     rank_zero_info("########## work in progress ##########")
 
     ########################################################################################################
 
-    import os, warnings, math, datetime, sys, time, importlib
+    import os, warnings, datetime
     import numpy as np
     import torch
-    from torch.utils.data import DataLoader
 
     if args.seed >= 0:
         LOG.info(f"########## WARNING: GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n" * 3)
@@ -229,7 +233,7 @@ if __name__ == "__main__":
     scheduler_params = deepspeed_config.scheduler_params
     args.warmup_steps = scheduler_params["warmup_num_steps"] if scheduler_params else 0
 
-    args.accelerator = get_accelerator()._name.upper()
+    args.accelerator = dist.get_accelerator()._name.upper()
 
     os.environ["RWKV_T_MAX"] = str(args.ctx_len)
     os.environ["RWKV_MY_TESTING"] = args.my_testing
