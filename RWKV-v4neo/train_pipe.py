@@ -7,14 +7,12 @@ from argparse import ArgumentParser
 import deepspeed
 from deepspeed import DeepSpeedConfig
 from deepspeed import comm as dist
-from deepspeed.utils.logging import LoggerFactory
 from deepspeed.runtime.config import ZeroStageEnum
+from deepspeed.utils.logging import LoggerFactory, log_dist
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipelineParallelGrid
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 import os
-
-LOG = LoggerFactory.create_logger(name="train_pipe", level=logging.INFO)
 
 GLOBAL_RANK = dist.get_world_rank_from_launcher()
 WORLD_SIZE = dist.get_world_size_from_launcher()
@@ -58,10 +56,12 @@ class DeltaTorchCheckPointEngine(TorchCheckpointEngine):
         return False
 
 
-
 def rank_zero_info(info: str):
-    if GLOBAL_RANK == 0:
-        LOG.info(info)
+    log_dist(info, ranks=[0])
+
+
+def rank_all_info(info: str):
+    log_dist(info, ranks=[-1])
 
 
 def get_args():
@@ -88,7 +88,6 @@ def get_args():
     parser.add_argument("--load_model", default="", type=str)  # pretrained splited checkpoints directory with multiple layer_*_model_*.pt under it
     parser.add_argument("--wandb", default="", type=str)  # wandb project name. if "" then don't use wandb
     parser.add_argument("--proj_dir", default="out", type=str)
-    parser.add_argument("--random_seed", default="-1", type=int)
 
     parser.add_argument("--data_file", default="", type=str)
     parser.add_argument("--data_type", default="utf-8", type=str)
@@ -206,8 +205,8 @@ if __name__ == "__main__":
     import torch
 
     if args.seed >= 0:
-        LOG.info(f"########## WARNING: GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n" * 3)
-        torch.manual_seed(args.random_seed)
+        rank_all_info(f"########## WARNING: GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n" * 3)
+        torch.manual_seed(args.seed)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
@@ -344,7 +343,11 @@ if __name__ == "__main__":
     if deepspeed_config.zero_optimization_stage == ZeroStageEnum.weights:
         os.environ["RWKV_JIT_ON"] = "0"
     if args.lora and args.grad_cp == 1:
-        LOG.warn('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
+        log_dist(
+            '!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it',
+            ranks=[-1],
+            level=logging.WARNING
+        )
         os.environ["RWKV_JIT_ON"] = "0"
 
     torch.backends.cudnn.benchmark = True
@@ -374,9 +377,11 @@ if __name__ == "__main__":
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
 
     pipe_module = RWKVPipe(args, num_stages=args.pipeline_parallel_size)
+    dist.barrier()
 
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
     trainset = PipeDataset(args) if need_to_load_data else None
+    dist.barrier()
 
     rank_zero_info(f"########## Loading {args.load_model}... ##########")
     try:
@@ -396,6 +401,8 @@ if __name__ == "__main__":
             strict=False,
             checkpoint_engine=TorchCheckpointEngine()
         )
+    dist.barrier()
+    rank_all_info(f"loaded pretrained checkpoint from {args.lora_load}")
 
     # only train lora parameters
     if args.lora:
@@ -403,21 +410,23 @@ if __name__ == "__main__":
         for name, module in pipe_module.named_modules():
             # have to check param name since it may have been wrapped by torchscript
             if any(n.startswith("lora_") for n, _ in module.named_parameters()):
-                LOG.info(f'  LoRA training module {name}')
+                rank_all_info(f'  LoRA training module {name}')
                 for pname, param in module.named_parameters():
                     param.requires_grad = 'lora_' in pname
             elif enable_ln_finetune and '.ln' in name:
-                LOG.info(f'  LoRA additionally training module {name}')
+                rank_all_info(f'  LoRA additionally training module {name}')
                 for param in module.parameters():
                     param.requires_grad = True
             elif enable_time_finetune and any(n.startswith("time") for n, _ in module.named_parameters()):
                 for pname, param in module.named_parameters():
                     if pname.startswith("time"):
-                        LOG.info(f'  LoRA additionally training parameter {pname}')
+                        rank_all_info(f'  LoRA additionally training parameter {pname}')
                         param.requires_grad = True
 
     trainable_parameters = [p for p in pipe_module.parameters() if p.requires_grad]
-    LOG.info(f"trainable parameter size is {sum(p.size().numel() for p in trainable_parameters)}")
+    rank_all_info(f"trainable parameter size is {sum(p.size().numel() for p in trainable_parameters)}")
+    rank_all_info(f"preparing engine, optimizer, dataset, etc.")
+    dist.barrier()
     pipe_engine, optimizer, _, _ = deepspeed.initialize(
         args=args,
         model=pipe_module,
@@ -425,7 +434,8 @@ if __name__ == "__main__":
         training_data=trainset
     )
     
-    assert isinstance(pipe_engine, deepspeed.PipelineEngine)
+    assert isinstance(pipe_engine, deepspeed.PipelineEngine), "initialized engine should be pipe_engine"
+    rank_all_info(f"replace checkpoint engine with delta engine to save trainable parameters only.")
     pipe_engine.checkpoint_engine = DeltaTorchCheckPointEngine(
         lora=args.lora,
         enable_ln_finetune=enable_ln_finetune,
@@ -474,9 +484,11 @@ if __name__ == "__main__":
 
 
     save_every_steps = 100
+    dist.barrier()
+    rank_all_info("ready to train.")
     for step in range(args.steps):
         loss = pipe_engine.train_batch()
         if step % deepspeed_config.steps_per_print == 0:
-            LOG.info(f"training loss: {loss} at step: {step}")
+            rank_zero_info(f"training loss: {loss} at step: {step}")
         if step % save_every_steps == 0:
             pipe_engine.save_checkpoint(args.proj_dir)
