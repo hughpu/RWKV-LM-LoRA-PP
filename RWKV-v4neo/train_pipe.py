@@ -59,7 +59,7 @@ class DeltaTorchCheckPointEngine(TorchCheckpointEngine):
         return False
 
 def wrap_rank(info: str):
-    return f"[RANK {dist.get_global_rank()}] {info}"
+    return f"[RANK {GLOBAL_RANK}] {info}"
 
 
 def get_args():
