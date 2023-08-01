@@ -20,6 +20,7 @@ GLOBAL_RANK = dist.get_world_rank_from_launcher()
 WORLD_SIZE = dist.get_world_size_from_launcher()
 NUM_NODES = int(os.environ["CROSS_SIZE"])
 NUM_DEVICES = int(os.environ["LOCAL_SIZE"])
+LOG = LoggerFactory.create_logger(name="rwkv", level=logging.INFO)
 
 
 class DeltaTorchCheckPointEngine(TorchCheckpointEngine):
@@ -57,13 +58,8 @@ class DeltaTorchCheckPointEngine(TorchCheckpointEngine):
 
         return False
 
-
-def rank_zero_info(info: str):
-    log_dist(info, ranks=[0])
-
-
-def rank_all_info(info: str):
-    log_dist(info, ranks=[-1])
+def wrap_rank(info: str):
+    return f"[RANK {dist.get_global_rank()}] {info}"
 
 
 def get_args():
@@ -192,14 +188,19 @@ if __name__ == "__main__":
     deepspeed.init_distributed(
         dist_backend=args.backend
     )
+    LOG.info(
+        wrap_rank(
+            f"torch distributed env is initialized({dist.is_initialized()}) and available({dist.is_available()})"
+        )
+    )
     ppsize = args.pipeline_parallel_size
     assert WORLD_SIZE % ppsize == 0, f"pipeline parallelism {ppsize} and world size {WORLD_SIZE} are not match."
     topology = PipeDataParallelTopology(num_dp=WORLD_SIZE // ppsize, num_pp=ppsize)
     mpu = PipelineParallelGrid(topology=topology)
     deepspeed_config = DeepSpeedConfig(args.deepspeed_config, mpu=mpu)
-    configure(enabled=True, debug=True, verbose=True)
-
-    rank_zero_info("########## work in progress ##########")
+    
+    if dist.get_global_rank() == 0:
+        LOG.info("########## work in progress ##########")
 
     ########################################################################################################
 
@@ -208,7 +209,7 @@ if __name__ == "__main__":
     import torch
 
     if args.seed >= 0:
-        rank_all_info(f"########## WARNING: GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n" * 3)
+        LOG.warn(wrap_rank(f"########## WARNING: GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n"))
         torch.manual_seed(args.seed)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
@@ -303,7 +304,8 @@ if __name__ == "__main__":
     float_mode = 'fp16' if deepspeed_config.fp16_enabled else 'fp32'
     float_mode = 'bf16' if deepspeed_config.bfloat16_enabled else float_mode
 
-    rank_zero_info(
+    if dist.get_global_rank() == 0:
+        LOG.info(
         f"""
 ############################################################################
 #
@@ -325,19 +327,22 @@ if __name__ == "__main__":
 ############################################################################
 """
     )
-    rank_zero_info(str(vars(args)) + "\n")
+        LOG.info(str(vars(args)) + "\n")
 
     assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "wds_img", "uint16"]
 
     if args.lr_final == 0 or args.lr_init == 0:
-        rank_zero_info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")
+        if dist.get_global_rank() == 0:
+            LOG.info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")
 
     os.environ["RWKV_FLOAT_MODE"] = float_mode
     if float_mode == "fp32":
         for i in range(10):
-            rank_zero_info("\n\nNote: you are using fp32 (very slow). Try bf16 / tf32 for faster training.\n\n")
+            if dist.get_global_rank() == 0:
+                LOG.info("\n\nNote: you are using fp32 (very slow). Try bf16 / tf32 for faster training.\n\n")
     if float_mode == "fp16":
-        rank_zero_info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
+        if dist.get_global_rank() == 0:
+            LOG.info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
         torch.set_default_dtype(torch.float16)
     if float_mode == "bf16":
         torch.set_default_dtype(torch.bfloat16)
@@ -346,10 +351,8 @@ if __name__ == "__main__":
     if deepspeed_config.zero_optimization_stage == ZeroStageEnum.weights:
         os.environ["RWKV_JIT_ON"] = "0"
     if args.lora and args.grad_cp == 1:
-        log_dist(
-            '!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it',
-            ranks=[-1],
-            level=logging.WARNING
+        LOG.warn(
+            wrap_rank('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
         )
         os.environ["RWKV_JIT_ON"] = "0"
 
@@ -380,15 +383,13 @@ if __name__ == "__main__":
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
 
     pipe_module = RWKVPipe(args, num_stages=args.pipeline_parallel_size)
-    rank_all_info("got rwkv pipeline module.")
+    LOG.info(wrap_rank("got rwkv pipeline module."))
 
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
-    trainset = PipeDataset(args)
-    rank_all_info("got dataset for training.")
-    rank_all_info(f"torch distributed env is initialized({dist.is_initialized()}) and available({dist.is_available()})")
-    torch.distributed.barrier()
+    trainset = PipeDataset(args) if need_to_load_data else None
+    LOG.info(wrap_rank("got dataset for training."))
 
-    rank_all_info(f"########## Loading {args.load_model}... ##########")
+    LOG.info(wrap_rank(f"########## Loading {args.load_model}... ##########"))
     try:
         pipe_module.load_state_dir(
             args.load_model,
@@ -396,7 +397,7 @@ if __name__ == "__main__":
             checkpoint_engine=TorchCheckpointEngine()
         )
     except:
-        rank_zero_info(f"Bad checkpoint {args.load_model}")
+        LOG.info(wrap_rank(f"Bad checkpoint {args.load_model}"))
         exit(1)
 
     # If using LoRA, the LoRA keys might be missing in the original model
@@ -406,8 +407,7 @@ if __name__ == "__main__":
             strict=False,
             checkpoint_engine=TorchCheckpointEngine()
         )
-    dist.barrier()
-    rank_all_info(f"loaded pretrained checkpoint from {args.lora_load}")
+    LOG.info(wrap_rank(f"loaded pretrained checkpoint from {args.lora_load}"))
 
     # only train lora parameters
     if args.lora:
@@ -415,23 +415,22 @@ if __name__ == "__main__":
         for name, module in pipe_module.named_modules():
             # have to check param name since it may have been wrapped by torchscript
             if any(n.startswith("lora_") for n, _ in module.named_parameters()):
-                rank_all_info(f'  LoRA training module {name}')
+                LOG.info(wrap_rank(f'  LoRA training module {name}'))
                 for pname, param in module.named_parameters():
                     param.requires_grad = 'lora_' in pname
             elif enable_ln_finetune and '.ln' in name:
-                rank_all_info(f'  LoRA additionally training module {name}')
+                LOG.info(wrap_rank(f'  LoRA additionally training module {name}'))
                 for param in module.parameters():
                     param.requires_grad = True
             elif enable_time_finetune and any(n.startswith("time") for n, _ in module.named_parameters()):
                 for pname, param in module.named_parameters():
                     if pname.startswith("time"):
-                        rank_all_info(f'  LoRA additionally training parameter {pname}')
+                        LOG.info(wrap_rank(f'  LoRA additionally training parameter {pname}'))
                         param.requires_grad = True
 
     trainable_parameters = [p for p in pipe_module.parameters() if p.requires_grad]
-    rank_all_info(f"trainable parameter size is {sum(p.size().numel() for p in trainable_parameters)}")
-    rank_all_info(f"preparing engine, optimizer, dataset, etc.")
-    dist.barrier()
+    LOG.info(wrap_rank(f"trainable parameter size is {sum(p.size().numel() for p in trainable_parameters)}"))
+    LOG.info(wrap_rank(f"preparing engine, optimizer, dataset, etc."))
     pipe_engine, optimizer, _, _ = deepspeed.initialize(
         args=args,
         model=pipe_module,
@@ -440,7 +439,7 @@ if __name__ == "__main__":
     )
     
     assert isinstance(pipe_engine, deepspeed.PipelineEngine), "initialized engine should be pipe_engine"
-    rank_all_info(f"replace checkpoint engine with delta engine to save trainable parameters only.")
+    LOG.info(wrap_rank(f"replace checkpoint engine with delta engine to save trainable parameters only."))
     pipe_engine.checkpoint_engine = DeltaTorchCheckPointEngine(
         lora=args.lora,
         enable_ln_finetune=enable_ln_finetune,
@@ -454,7 +453,8 @@ if __name__ == "__main__":
     # tuned the arguments since they are not required to config at the same time
     grad_acc_steps = max(grad_acc_steps, train_batch_size // micro_batch_size)
     micro_batch_size = min(micro_batch_size, train_batch_size // grad_acc_steps)
-    rank_zero_info(
+    if dist.get_global_rank() == 0:
+        LOG.info(
         f"Train batch size: {train_batch_size}, Gradient accumulation steps: {grad_acc_steps}, Micro batch size, {micro_batch_size}."
     )
     
@@ -462,21 +462,24 @@ if __name__ == "__main__":
     data_parallelism = pipe_engine.grid.data_parallel_size
     model_parallelism = pipe_engine.grid.model_parallel_size
     pipeline_parallelism = pipe_engine.grid.pipe_parallel_size
-    rank_zero_info(
-        f"Data Parallelism: {data_parallelism}, Model Parallelism: {model_parallelism}, Pipeline Parallelism: {pipeline_parallelism}."
-    )
+    if dist.get_global_rank() == 0:
+        LOG.info(
+            f"Data Parallelism: {data_parallelism}, Model Parallelism: {model_parallelism}, Pipeline Parallelism: {pipeline_parallelism}."
+        )
 
     if (args.lr_init > 1e-4 or train_batch_size < 8):
         if 'I_KNOW_WHAT_IM_DOING' in os.environ:
-            rank_zero_info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-            rank_zero_info(f'  WARNING: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({WORLD_SIZE} * {micro_batch_size} * {grad_acc_steps} < 8)')
-            rank_zero_info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            if dist.get_global_rank() == 0:
+                LOG.info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                LOG.info(f'  WARNING: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({WORLD_SIZE} * {micro_batch_size} * {grad_acc_steps} < 8)')
+                LOG.info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         else:
-            rank_zero_info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-            rank_zero_info(f'  ERROR: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({WORLD_SIZE} * {micro_batch_size} * {grad_acc_steps} < 8)')
-            rank_zero_info(f'  Unless you are sure this is what you want, adjust them accordingly')
-            rank_zero_info(f'  (to suppress this, set environment variable "I_KNOW_WHAT_IM_DOING")')
-            rank_zero_info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            if dist.get_global_rank() == 0:
+                LOG.info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                LOG.info(f'  ERROR: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({WORLD_SIZE} * {micro_batch_size} * {grad_acc_steps} < 8)')
+                LOG.info(f'  Unless you are sure this is what you want, adjust them accordingly')
+                LOG.info(f'  (to suppress this, set environment variable "I_KNOW_WHAT_IM_DOING")')
+                LOG.info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
             exit(0)
 
     for name, param in pipe_module.state_dict().items():
@@ -489,11 +492,12 @@ if __name__ == "__main__":
 
 
     save_every_steps = 100
-    dist.barrier()
-    rank_all_info("ready to train.")
+    if dist.get_global_rank() == 0:
+        LOG.info("ready to train.")
     for step in range(args.steps):
         loss = pipe_engine.train_batch()
         if step % deepspeed_config.steps_per_print == 0:
-            rank_zero_info(f"training loss: {loss} at step: {step}")
+            if dist.get_global_rank() == 0:
+                LOG.info(f"training loss: {loss} at step: {step}")
         if step % save_every_steps == 0:
             pipe_engine.save_checkpoint(args.proj_dir)
