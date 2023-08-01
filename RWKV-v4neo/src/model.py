@@ -430,6 +430,8 @@ TT = TypeVar("TT", bound=Tuple[torch.Tensor, torch.Tensor])
 RWKVT = TypeVar("RWKVT", bound="RWKV")
 
 PPE = TypeVar("PPE", bound="PPEmbedding")
+NONE_TENSOR = lambda: torch.Tensor([])
+
 class PPEmbedding(nn.Embedding):
     @classmethod
     def get_spec_from_rwkv_args(cls: Type[PPE], args: Namespace) -> LayerSpec:
@@ -454,8 +456,8 @@ class PPEmbedding(nn.Embedding):
     
     def forward(self, inputs: torch.Tensor) -> TTT:
         embedding = super().forward(inputs)
-        embedding_for_tiny_att = embedding if self.pass_emb_to_output else None
-        idx = inputs if self.pass_idx else None
+        embedding_for_tiny_att = embedding if self.pass_emb_to_output else NONE_TENSOR()
+        idx = inputs if self.pass_idx else NONE_TENSOR()
         
         return (embedding, embedding_for_tiny_att, idx)
     
