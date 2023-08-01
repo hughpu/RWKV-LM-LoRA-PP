@@ -14,6 +14,7 @@ from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipelinePa
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 import os
+import torch
 
 GLOBAL_RANK = dist.get_world_rank_from_launcher()
 WORLD_SIZE = dist.get_world_size_from_launcher()
@@ -384,7 +385,8 @@ if __name__ == "__main__":
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
     trainset = PipeDataset(args)
     rank_all_info("got dataset for training.")
-    dist.barrier()
+    rank_all_info(f"torch distributed env is initialized({dist.is_initialized()}) and available({dist.is_available()})")
+    torch.distributed.barrier()
 
     rank_all_info(f"########## Loading {args.load_model}... ##########")
     try:
