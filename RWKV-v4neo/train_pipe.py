@@ -377,13 +377,15 @@ if __name__ == "__main__":
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
 
     pipe_module = RWKVPipe(args, num_stages=args.pipeline_parallel_size)
+    rank_all_info("got rwkv pipeline module.")
     dist.barrier()
 
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
-    trainset = PipeDataset(args) if need_to_load_data else None
+    trainset = PipeDataset(args)
+    rank_all_info("got dataset for training.")
     dist.barrier()
 
-    rank_zero_info(f"########## Loading {args.load_model}... ##########")
+    rank_all_info(f"########## Loading {args.load_model}... ##########")
     try:
         pipe_module.load_state_dir(
             args.load_model,
