@@ -454,16 +454,16 @@ class PPEmbedding(nn.Embedding):
         super().__init__(vocab_size, n_embd)
         self.pass_emb_to_output = tiny_att_dim > 0
         self.pass_idx = head_qk > 0
-        local_rank = dist.get_local_rank()
-        device = dist.get_accelerator().device_name(local_rank)
-        self.none_tensor = torch.Tensor([]).to(device=device).detach()
     
     def forward(self, inputs: torch.Tensor) -> TTT:
         embedding = super().forward(inputs)
-        embedding_for_tiny_att = embedding if self.pass_emb_to_output else self.none_tensor
-        idx = inputs if self.pass_idx else self.none_tensor
+        output = [embedding]
+        if self.pass_emb_to_output:
+            output.append(embedding)
+        if self.pass_idx:
+            output.append(inputs)
         
-        return (embedding, embedding_for_tiny_att, idx)
+        return tuple(output) if len(output) > 1 else embedding
     
     def load_state_from_rwkv(self, rwkv: RWKVT):
         self.load_state_dict(rwkv.emb.state_dict())
@@ -474,6 +474,11 @@ class PPEmbedding(nn.Embedding):
 
 PPB = TypeVar("PPB", bound="PPBlock")
 class PPBlock(Block):
+    def __init__(self, args, layer_id):
+        super().__init__(args, layer_id)
+        self.pass_emb_to_output = args.tiny_att_dim > 0
+        self.pass_idx = args.head_qk > 0
+
     @classmethod
     def get_spec_from_rwkv_args(cls: Type[PPB], args: Namespace, layer_id: int) -> LayerSpec:
         return LayerSpec(
@@ -483,9 +488,26 @@ class PPBlock(Block):
         )
     
     def forward(self, inputs: TTT) -> TTT:
-        x, x_emb, idx = inputs
-        output = super().forward(x, x_emb=x_emb)
-        return (output, x_emb, idx)
+        if self.pass_emb_to_output and self.pass_idx:
+            x, x_emb, idx = inputs
+        elif self.pass_emb_to_output:
+            x, x_emb = inputs
+            idx = None
+        elif self.pass_idx:
+            x, idx = inputs
+            x_emb = None
+        else:
+            x = inputs
+            x_emb = idx = None
+
+        res = super().forward(x, x_emb=x_emb)
+        output = [res]
+        if x_emb is not None:
+            output.append(x_emb)
+        if idx is not None:
+            output.append(idx)
+
+        return tuple(output) if len(output) > 1 else res
     
     def load_state_from_rwkv(self, rwkv: RWKVT):
         block: Block = rwkv.blocks[self.layer_id]
@@ -498,17 +520,39 @@ class PPBlock(Block):
 
 PPLN = TypeVar("PPLN", bound="PPLinearOut")
 class PPLinearOut(nn.LayerNorm):
+    def __init__(
+        self,
+        n_embd: int,  
+        tiny_att_dim: int,
+        head_qk: int
+    ):
+        super().__init__(n_embd)
+        self.pass_emb_to_output = tiny_att_dim > 0
+        self.pass_idx = head_qk > 0
+
     @classmethod
     def get_spec_from_rwkv_args(cls: Type[PPLN], args: Namespace) -> LayerSpec:
         return LayerSpec(
             cls,
-            args.n_embd
+            args.n_embd,
+            args.tiny_att_dim,
+            args.head_qk
         )
     
     def forward(self, inputs: TTT) -> TT:
-        x, _, idx = inputs
+        if self.pass_emb_to_output and self.pass_idx:
+            x, _, idx = inputs
+        elif self.pass_emb_to_output:
+            x, _ = inputs
+            idx = None
+        elif self.pass_idx:
+            x, idx = inputs
+        else:
+            x = inputs
+            idx = None
+
         output = super().forward(x)
-        return (output, idx)
+        return (output, idx) if idx is not None else output
     
     def load_state_from_rwkv(self, rwkv: RWKVT):
         self.load_state_dict(rwkv.ln_out.state_dict())
@@ -548,8 +592,8 @@ class PPHead(nn.Module):
             self.register_buffer("copy_mask", torch.tril(torch.ones(ctx_len, ctx_len)))
         
     def forward(self, inputs: TT) -> torch.Tensor:
-        x, idx = inputs
         if self.head_qk > 0:
+            x, idx = inputs
             _, T = idx.size()
             q = self.head_q(x)[:, :T, :]
             k = self.head_k(x)[:, :T, :]
@@ -565,6 +609,7 @@ class PPHead(nn.Module):
 
             x = self.head(x) + c
         else:
+            x = inputs
             x = self.head(x)
         
         return x
