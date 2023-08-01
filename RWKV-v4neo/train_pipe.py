@@ -199,7 +199,7 @@ if __name__ == "__main__":
     mpu = PipelineParallelGrid(topology=topology)
     deepspeed_config = DeepSpeedConfig(args.deepspeed_config, mpu=mpu)
     
-    if dist.get_global_rank() == 0:
+    if GLOBAL_RANK == 0:
         LOG.info("########## work in progress ##########")
 
     ########################################################################################################
@@ -304,7 +304,7 @@ if __name__ == "__main__":
     float_mode = 'fp16' if deepspeed_config.fp16_enabled else 'fp32'
     float_mode = 'bf16' if deepspeed_config.bfloat16_enabled else float_mode
 
-    if dist.get_global_rank() == 0:
+    if GLOBAL_RANK == 0:
         LOG.info(
         f"""
 ############################################################################
@@ -332,16 +332,16 @@ if __name__ == "__main__":
     assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "wds_img", "uint16"]
 
     if args.lr_final == 0 or args.lr_init == 0:
-        if dist.get_global_rank() == 0:
+        if GLOBAL_RANK == 0:
             LOG.info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")
 
     os.environ["RWKV_FLOAT_MODE"] = float_mode
     if float_mode == "fp32":
         for i in range(10):
-            if dist.get_global_rank() == 0:
+            if GLOBAL_RANK == 0:
                 LOG.info("\n\nNote: you are using fp32 (very slow). Try bf16 / tf32 for faster training.\n\n")
     if float_mode == "fp16":
-        if dist.get_global_rank() == 0:
+        if GLOBAL_RANK == 0:
             LOG.info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
         torch.set_default_dtype(torch.float16)
     if float_mode == "bf16":
@@ -453,7 +453,7 @@ if __name__ == "__main__":
     # tuned the arguments since they are not required to config at the same time
     grad_acc_steps = max(grad_acc_steps, train_batch_size // micro_batch_size)
     micro_batch_size = min(micro_batch_size, train_batch_size // grad_acc_steps)
-    if dist.get_global_rank() == 0:
+    if GLOBAL_RANK == 0:
         LOG.info(
         f"Train batch size: {train_batch_size}, Gradient accumulation steps: {grad_acc_steps}, Micro batch size, {micro_batch_size}."
     )
@@ -462,19 +462,19 @@ if __name__ == "__main__":
     data_parallelism = pipe_engine.grid.data_parallel_size
     model_parallelism = pipe_engine.grid.model_parallel_size
     pipeline_parallelism = pipe_engine.grid.pipe_parallel_size
-    if dist.get_global_rank() == 0:
+    if GLOBAL_RANK == 0:
         LOG.info(
             f"Data Parallelism: {data_parallelism}, Model Parallelism: {model_parallelism}, Pipeline Parallelism: {pipeline_parallelism}."
         )
 
     if (args.lr_init > 1e-4 or train_batch_size < 8):
         if 'I_KNOW_WHAT_IM_DOING' in os.environ:
-            if dist.get_global_rank() == 0:
+            if GLOBAL_RANK == 0:
                 LOG.info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
                 LOG.info(f'  WARNING: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({WORLD_SIZE} * {micro_batch_size} * {grad_acc_steps} < 8)')
                 LOG.info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         else:
-            if dist.get_global_rank() == 0:
+            if GLOBAL_RANK == 0:
                 LOG.info('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
                 LOG.info(f'  ERROR: you are using too large LR ({args.lr_init} > 1e-4) or too small global batch size ({WORLD_SIZE} * {micro_batch_size} * {grad_acc_steps} < 8)')
                 LOG.info(f'  Unless you are sure this is what you want, adjust them accordingly')
@@ -492,12 +492,12 @@ if __name__ == "__main__":
 
 
     save_every_steps = 100
-    if dist.get_global_rank() == 0:
+    if GLOBAL_RANK == 0:
         LOG.info("ready to train.")
     for step in range(args.steps):
         loss = pipe_engine.train_batch()
         if step % deepspeed_config.steps_per_print == 0:
-            if dist.get_global_rank() == 0:
+            if GLOBAL_RANK == 0:
                 LOG.info(f"training loss: {loss} at step: {step}")
         if step % save_every_steps == 0:
             pipe_engine.save_checkpoint(args.proj_dir)
