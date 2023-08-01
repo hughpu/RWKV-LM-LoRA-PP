@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 import deepspeed
 from deepspeed import DeepSpeedConfig
 from deepspeed import comm as dist
+from deepspeed.comm.comm import configure
 from deepspeed.runtime.config import ZeroStageEnum
 from deepspeed.utils.logging import LoggerFactory, log_dist
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipelineParallelGrid
@@ -195,6 +196,7 @@ if __name__ == "__main__":
     topology = PipeDataParallelTopology(num_dp=WORLD_SIZE // ppsize, num_pp=ppsize)
     mpu = PipelineParallelGrid(topology=topology)
     deepspeed_config = DeepSpeedConfig(args.deepspeed_config, mpu=mpu)
+    configure(enabled=True, debug=True, verbose=True)
 
     rank_zero_info("########## work in progress ##########")
 
@@ -378,7 +380,6 @@ if __name__ == "__main__":
 
     pipe_module = RWKVPipe(args, num_stages=args.pipeline_parallel_size)
     rank_all_info("got rwkv pipeline module.")
-    dist.barrier()
 
     need_to_load_data = pipe_module._grid.is_first_stage or pipe_module._grid.is_last_stage
     trainset = PipeDataset(args)
