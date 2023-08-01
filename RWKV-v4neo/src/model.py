@@ -20,6 +20,7 @@ if importlib.util.find_spec('deepspeed'):
 # from deepspeed.runtime.fp16.onebit.zoadam import ZeroOneAdam
 from typing import Tuple, List, TypeVar, Type
 from deepspeed.pipe import LayerSpec, PipelineModule
+from deepspeed import comm as dist
 from argparse import Namespace
 
 LORA_CONFIG = {
@@ -453,11 +454,14 @@ class PPEmbedding(nn.Embedding):
         super().__init__(vocab_size, n_embd)
         self.pass_emb_to_output = tiny_att_dim > 0
         self.pass_idx = head_qk > 0
+        local_rank = dist.get_local_rank()
+        device = dist.get_accelerator().device_name(local_rank)
+        self.none_tensor = torch.Tensor([]).to(device=device).detach()
     
     def forward(self, inputs: torch.Tensor) -> TTT:
         embedding = super().forward(inputs)
-        embedding_for_tiny_att = embedding if self.pass_emb_to_output else NONE_TENSOR()
-        idx = inputs if self.pass_idx else NONE_TENSOR()
+        embedding_for_tiny_att = embedding if self.pass_emb_to_output else self.none_tensor
+        idx = inputs if self.pass_idx else self.none_tensor
         
         return (embedding, embedding_for_tiny_att, idx)
     
