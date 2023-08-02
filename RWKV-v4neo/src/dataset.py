@@ -239,7 +239,15 @@ class PipeDataset(MyDataset):
         # TODO: modified the real_epoch_setting according to args and other properties of `self` in the future to support pile corpus
         self.real_epoch = 10
         
-        self._len = (self.data_size - 1) // self.args.ctx_len + 1
+        self._len = (self.data_size - 2) // self.args.ctx_len + 1
+        self._seed = args.seed
 
     def __len__(self):
         return self._len
+    
+    def __getitem__(self, idx):
+        state = np.random.get_state()
+        np.random.seed(idx + self._seed)
+        sample = super().__getitem__(idx)
+        np.random.set_state(state)
+        return sample

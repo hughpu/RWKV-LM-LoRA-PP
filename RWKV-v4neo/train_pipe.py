@@ -213,9 +213,8 @@ if __name__ == "__main__":
         LOG.info(wrap_rank(f"########## GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n"))
         seed = args.seed
         torch.manual_seed(seed)
-        random.seed(seed)
-        torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+        random.seed(seed)
         np.random.seed(seed)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
@@ -413,7 +412,7 @@ if __name__ == "__main__":
             strict=False,
             checkpoint_engine=TorchCheckpointEngine()
         )
-    LOG.info(wrap_rank(f"loaded pretrained checkpoint from {args.lora_load}"))
+        LOG.info(wrap_rank(f"loaded pretrained checkpoint from {args.lora_load}"))
 
     # only train lora parameters
     if args.lora:
