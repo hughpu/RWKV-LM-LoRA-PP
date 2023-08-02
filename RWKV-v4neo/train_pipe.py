@@ -207,10 +207,16 @@ if __name__ == "__main__":
     import os, warnings, datetime
     import numpy as np
     import torch
+    import random
 
     if args.seed >= 0:
-        LOG.warn(wrap_rank(f"########## WARNING: GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n"))
-        torch.manual_seed(args.seed)
+        LOG.info(wrap_rank(f"########## GLOBAL SEED {args.seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n"))
+        seed = args.seed
+        torch.manual_seed(seed)
+        random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
