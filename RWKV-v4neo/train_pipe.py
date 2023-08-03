@@ -4,6 +4,7 @@
 import logging
 from argparse import ArgumentParser
 
+import torch
 import deepspeed
 from deepspeed import DeepSpeedConfig
 from deepspeed import comm as dist
@@ -14,7 +15,7 @@ from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipelinePa
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 import os
-import torch
+import gc
 
 GLOBAL_RANK = dist.get_world_rank_from_launcher()
 WORLD_SIZE = dist.get_world_size_from_launcher()
@@ -432,6 +433,11 @@ if __name__ == "__main__":
                     if pname.startswith("time"):
                         LOG.info(wrap_rank(f'  LoRA additionally training parameter {pname}'))
                         param.requires_grad = True
+        del name, module
+        if 'pname' in locals():
+            del pname
+        if 'param' in locals():
+            del param
 
     trainable_parameters = [p for p in pipe_module.parameters() if p.requires_grad]
     LOG.info(wrap_rank(f"trainable parameter size is {sum(p.size().numel() for p in trainable_parameters)}"))
@@ -442,6 +448,7 @@ if __name__ == "__main__":
         model_parameters=trainable_parameters,
         training_data=trainset
     )
+    del trainable_parameters
     
     assert isinstance(pipe_engine, deepspeed.PipelineEngine), "initialized engine should be pipe_engine"
     LOG.info(wrap_rank(f"replace checkpoint engine with delta engine to save trainable parameters only."))
@@ -494,15 +501,20 @@ if __name__ == "__main__":
             print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)} {name}")
         else:
             print(f"{str(shape[0]).ljust(5)}       {name}")
+    del name, shape, param
 
 
-    save_every_steps = 100
     if GLOBAL_RANK == 0:
         LOG.info("ready to train.")
+
+    gc.collect()
+    torch.cuda.empty_cache()
     for step in range(args.steps):
         loss = pipe_engine.train_batch()
         if step % deepspeed_config.steps_per_print == 0:
             if GLOBAL_RANK == 0:
                 LOG.info(f"training loss: {loss} at step: {step}")
-        if step % save_every_steps == 0:
-            pipe_engine.save_checkpoint(args.proj_dir)
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    pipe_engine.save_checkpoint(args.proj_dir)
