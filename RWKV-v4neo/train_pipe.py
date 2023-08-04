@@ -63,6 +63,12 @@ def wrap_rank(info: str):
     return f"[RANK {GLOBAL_RANK}] {info}"
 
 
+def profile_mem(file, prefix=""):
+    occ, total = torch.cuda.mem_get_info()
+    with open(file, "a") as f:
+        f.write(f"{prefix}memory occupied: {occ}, memory total: {total}\n")
+
+
 def get_args():
     parser = ArgumentParser(description='RWKV Pipeline Parallelism Training')
     parser.add_argument('--local_rank',
@@ -509,6 +515,11 @@ if __name__ == "__main__":
 
     gc.collect()
     torch.cuda.empty_cache()
+    mem_prof_file = os.path.join(args.proj_dir, f"mem_profile_rank_{GLOBAL_RANK}")
+    is_debugging = pipe_engine._config.comms_config.comms_logger.debug
+    if is_debugging:
+        profile_mem(mem_prof_file, prefix="before training: ")
+
     for step in range(args.steps):
         loss = pipe_engine.train_batch()
         if step % deepspeed_config.steps_per_print == 0:
@@ -517,4 +528,11 @@ if __name__ == "__main__":
             gc.collect()
             torch.cuda.empty_cache()
 
+            if is_debugging:
+                profile_mem(mem_prof_file, prefix=f"during training step-{step}: ")
+
     pipe_engine.save_checkpoint(args.proj_dir)
+    if is_debugging:
+        gc.collect()
+        torch.cuda.empty_cache()
+        profile_mem(mem_prof_file, prefix="after trained: ")
