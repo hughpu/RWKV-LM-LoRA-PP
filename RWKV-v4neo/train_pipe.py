@@ -362,7 +362,7 @@ if __name__ == "__main__":
     os.environ["RWKV_JIT_ON"] = "1"
     if deepspeed_config.zero_optimization_stage == ZeroStageEnum.weights:
         os.environ["RWKV_JIT_ON"] = "0"
-    if args.lora and args.grad_cp == 1:
+    if args.grad_cp == 1 or deepspeed_config.pipeline["activation_checkpoint_interval"] > 0:
         LOG.warn(
             wrap_rank('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
         )
