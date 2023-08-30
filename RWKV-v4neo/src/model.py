@@ -21,6 +21,7 @@ if importlib.util.find_spec('deepspeed'):
 from typing import Tuple, List, TypeVar, Type
 from deepspeed.pipe import LayerSpec, PipelineModule
 from deepspeed import comm as dist
+from deepspeed.runtime.activation_checkpointing.checkpointing import non_reentrant_checkpoint
 from argparse import Namespace
 
 LORA_CONFIG = {
@@ -958,7 +959,7 @@ class RWKVPipe(PipelineModule):
         layer_specs.append(PPHead.get_spec_from_rwkv_args(args))
         
         loss_fn = get_loss(args)
-        super().__init__(layer_specs, num_stages=num_stages, loss_fn=loss_fn)
+        super().__init__(layer_specs, num_stages=num_stages, loss_fn=loss_fn, activation_checkpoint_func=non_reentrant_checkpoint)
 
     def load_state_from_rwkv(self, rwkv: RWKV):
         for layer in self.forward_funcs:

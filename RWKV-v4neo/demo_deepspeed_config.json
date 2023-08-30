@@ -15,5 +15,8 @@
     "bf16": {
         "enabled": true
     },
-    "steps_per_print": 20
+    "steps_per_print": 20,
+    "pipeline": {
+        "activation_checkpoint_interval": 1
+    }
 }
